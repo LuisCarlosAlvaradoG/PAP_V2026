@@ -1,0 +1,4 @@
+matplotlib
+pandas
+schemdraw
+mpl_ornaments
