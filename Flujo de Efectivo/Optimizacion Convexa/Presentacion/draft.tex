@@ -1,0 +1,488 @@
+%Librerias
+\documentclass{beamer} % Iniciar Definiendo el Tipo de Documento
+\usetheme{metropolis} % Seleccionar tema para la diapositiva
+\usepackage[spanish]{babel} % Fecha en español
+\usepackage{tcolorbox} % Creador de cajas
+\usepackage{amsmath}
+\usepackage{ragged2e}
+\usepackage{soul}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+%Settings
+\tcbset{
+colframe=gray!40,
+colback=white,
+arc=2mm,
+boxrule=0.5pt,
+left=2pt,right=2pt,top=2pt,bottom=2pt,
+before=\vspace{0pt}
+}
+\definecolor{marcador}{HTML}{FFEAA7}
+\sethlcolor{marcador}
+
+%Init
+\title{Borrador}
+\subtitle{Modelo de Optimizacion F.E. FV-Procesados}
+\date{\today}
+
+\begin{document} %Iniciar cuerpo del Documento
+
+    \begin{frame}
+        \titlepage
+    \end{frame}
+
+    \begin{frame}{Datos Disponibles}
+        \begin{tcolorbox}
+            \begin{itemize}
+
+                \item [\color{teal}\checkmark]Ingresos en Forma saldo recibido de Parte de Particulares
+                \item [\color{teal}\checkmark]Recuperación de Cuentas (Ingreso)
+                \item [\color{teal}\textbf{?}]Ingresos en Forma de Efectivo Recibido
+                \item [\color{teal}\checkmark]Gastos de Operación (Egreso)
+                \item [\color{teal}\checkmark]Gastos Únicos (Egreso)
+                \item [\color{teal}\checkmark]Impuestos y Obligaciones (Egreso)
+                \item [\color{red}$\mathbf{\oslash}$]Personas Contratadas
+                \item [\color{red}$\mathbf{\oslash}$]Kg Recibidos
+                \item [\color{orange}\textbf{?}]No. De Insumos (Datos Incompletos)
+            \end{itemize}
+        \end{tcolorbox}
+    \end{frame}
+
+    \begin{frame}[t]{Analisis del S.E.}
+    El dataframe que use fue:
+    \vspace{-.5cm}
+    \begin{table}[htbp]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{3pt} % reduce separación entre columnas
+
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lllll}
+    \toprule
+    \textbf{Semanas} & \textbf{Costos (Egresos)} & \textbf{Clientes (Ingresos)} & \textbf{Gastos \& Otros(Egresos)} & \textbf{Conceptos Duplicados(Responsabilidades)} \\
+    \midrule
+    1  & [1000, 23000, 12000] & [320000, 10000, 4000] & [3000, 2000, 400] & [50000, 30000, 11000] \\
+    \ldots & [\ldots] & [\ldots] & [\ldots] & [\ldots] \\
+    29 & [15000, 2000, 12000] & [3000, 4000, 24000] & [100, 2000, 0] & [50000, 30000, 11000] \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{table}
+        \justifying{
+        La matriz $D \in \mathbb{R}^{29\times182}$ define el sistema $Ax=b$. Dado que el sistema de ecuaciones tiene la forma $m(29)<n(181)$, este posee múltiples soluciones.
+        Los grados de libertad del sistema vienen dados por
+        $\dim(\ker(D)) = 182 - 29 = 153$,
+        Toda solución factible puede expresarse como $x = x_p + z$, donde $x_p$ es una solución particular de $Ax=b$ y $z$ representa variaciones en variables $Az=0$ que no alteran $Ax=b$.
+        Para las condiciones de optimalidad $\nabla f(x) + A^\top \lambda = 0$, el problema de optimización consiste en encontrar el vector $z$ dentro de las soluciones factibles
+        que minimice la función objetivo:\\
+        $\min f(x_p + z).$}
+    \end{frame}
+
+    \begin{frame}[t]{Análisis de S.E.}
+        \justifying{El problema se puede resolver de manera tradicional ($x$) y probablemente explorando variaciones con una reparametrización ($x_p+z$).}
+        $$
+        \begin{bmatrix}
+        a_{1,1}({x_p}_{1,1}+z_{1,1}) & \cdots & a_{1,182}({x_p}_{1,182}+z_{1,182}) \\
+        \vdots & \ddots & \vdots \\
+        a_{29,1}({x_p}_{29,1}+z_{29,1}) & \cdots & a_{29,182}({x_p}_{29,182}+z_{29,182})
+        \end{bmatrix}
+        =
+        \begin{bmatrix}
+        b_1 \\ \vdots \\ b_{29}
+        \end{bmatrix}
+        $$
+
+        \justifying{$L(x, \lambda) = f(x) + \lambda^T(Ax-b)$}
+
+        \textbf{Si:}
+
+        \justifying{$b_{n+1} = b_n + \Delta b \quad \rightarrow \quad Ax' = b + \Delta b : x' = x+\Delta x$\\
+        $L(x, \lambda) = f(x) + \lambda^T(Ax-(b+ \Delta b))$
+
+        }
+
+    \end{frame}
+
+%    \begin{frame}[t]{Analisis de Datos}
+%        \begin{tcolorbox}
+%            \begin{block}{}
+%                \vspace{-.5cm}
+%                $x_n+1 = x_n + \Delta x_n $
+%                \newline
+%                var(F\%)
+%                \newline
+%                $y = f(x) = 0$
+%                \newline
+%                Ingresos
+%                \newline
+%                $I_tt<E_t$
+%
+%
+%            \end{block}{}
+%        \end{tcolorbox}
+%    \end{frame}
+
+
+%    \begin{frame}[t]{Analisis de Datos}
+%        \begin{tcolorbox}
+%            \begin{columns}
+ %           \hfill
+ %               \begin{column}{0.48\textwidth}
+%                    \begin{block}{Correlacion}
+%                   \vspace{.05cm}
+%                    Lorem ipsum dolor sit amet...
+ %                   \end{block}
+%                \end{column}
+%                \begin{column}{0.48\textwidth}
+ %                   \begin{block}{Dependencia Causal}
+%                    \vspace{.05cm}
+%                        \begin{tikzpicture}
+ %                           % Dibuja un círculo con centro en (0,0) y un radio de 2 cm
+%
+ %                           \filldraw[fill=blue!15, fill opacity=0.35,
+ %                                     draw=blue!80, line width=1pt]
+%                            (-2,1.5) circle (1cm);
+%
+%                            \filldraw[fill=green!15, fill opacity=0.35,
+%                                      draw=green!70!black, line width=1pt]
+%                            (0.5,1.5) circle (1cm);
+%
+ %                           \filldraw[fill=red!15, fill opacity=0.35,
+%                                      draw=red!80, line width=1pt]
+%                            (-.75,-.5) circle (1cm);
+%
+%                           \draw[dashed, thick] (-1,1.5) -- (-.5,1.5);
+%
+%                         \node[font=\fontsize{8}{10}\selectfont, align=center] at (-2,1.5) {$x_1$, $x_2$, $x_3$,\\ $x_4$, $x_n$...};
+%                          \node[font=\fontsize{8}{10}\selectfont, align=center] at (0.5,1.5) {$\delta_1$, $\delta_2$, $\delta_3$,\\ $\delta_4$, $\delta_n$...};
+%                           \node[font=\fontsize{8}{10}\selectfont, align=center] at (-0.75,-0.5) {$f_1$, $f_2$, $f_3$,\\ $f_4$, $f_n$...};
+%
+%
+%                        \end{tikzpicture}
+%                    \end{block}
+%                \end{column}
+%            \hfill
+%            \end{columns}
+%        \end{tcolorbox}
+%    \end{frame}
+
+%    \begin{frame}[t]{Regresiones Lineales?}
+%        \begin{tcolorbox}
+%            \begin{block}{}
+%                \vspace{-.5cm}
+%                $\beta$ en Para X en Y y T
+%
+%
+%            \end{block}{}
+%        \end{tcolorbox}
+%    \end{frame}
+
+%    \begin{frame}[t]{Logica Abstracta de Negocio}
+%        \begin{tcolorbox}
+%            \begin{block}{}
+%                {\textbf{Caja C\_t:} sa}
+%
+%
+%            \end{block}{}
+%        \end{tcolorbox}
+%    \end{frame}
+
+
+    \begin{frame}[t]{Primera Iteración} % Primera D.
+        \begin{columns}[t]
+            \begin{column}{0.55\textwidth}
+                \begin{tcolorbox}
+                    \begin{block}{\fontsize{9pt}{5pt}\selectfont Eq. 1} % Bloque de ecuacion
+                    \fontsize{7pt}{1pt}\selectfont
+                        \[
+                        \min_t \sum_{t=1}^T \left[\sum_i x_i D_{i, t} - \alpha U_t + \beta \max(0, L_{min} - C_t)\right]
+                        \]
+                        \justifying{La primera iteración de este modelo estuvo enfocada en la liquidación de la deuda como prioridad principal de la empresa.
+                        Debido a que no es viable destinar toda la utilidad disponible al pago de obligaciones financieras, se incorporó un hiperparámetro
+                        que permite controlar qué proporción del efectivo se asigna a la reducción de deuda, ajustando así el \hl{nivel de conservadurismo
+                        deseado respecto a la utilidad retenida.} Adicionalmente, como una mejora complementaria, se incluyó un \hl{hiperparámetro de penalización
+                        orientado a mantener un nivel mínimo de liquidez en caja.} Sin embargo, aunque ambos mecanismos persiguen objetivos positivos,
+                        las restricciones impuestas por el flujo de efectivo provocan que sus efectos sean en gran medida redundantes, ya que ambos terminan
+                        regulando la misma disponibilidad de efectivo.}
+                        \end{block}
+                \end{tcolorbox}
+            \end{column}
+
+            \begin{column}{0.50\textwidth}
+                \begin{tcolorbox}
+                    \begin{block}{\fontsize{9pt}{5pt}\selectfont Limites del Modelo}
+                    \fontsize{7pt}{1pt}\selectfont
+                        \[
+                        \min_t \sum_{t=1}^T \left[\sum_i x_i D_{i, t} + \beta \max(0, L_{min} - C_t)\right]
+                        \]
+                        \justifying{Separando ambos hiperparámetros de la funcion de mimizacion de deuda, se pueden evaluar ambos comportamientos.La logica general
+                        del problema presenta una limitaciónes importantes de no contar con restricciones: \hl{priorizar exclusivamente la liquidación de la deuda puede
+                        comprometer los gastos necesarios para mantener la operación del negocio.} Para solucionar esto se necesita contar con supuestos de utilidad
+                        por ejemplo $E_t = G_t + Imp_t$. Mientras que no calibrar correctamente $\alpha$ y $\beta$ haciendo una proyección puede vaciar la caja si el modelo
+                        converge hacia esa decision(recomendación). Lo mismo aplica para: }
+                        \[
+                        \min_t \sum_{t=1}^T \left[\sum_i x_i D_{i, t} - \alpha U_t\right]
+                        \]
+
+
+                    \end{block}
+                \end{tcolorbox}
+            \end{column}
+        \end{columns}
+    \end{frame}
+
+%    \begin{frame}
+%        \begin{tcolorbox}[grow to left by=0.6cm, grow to right by=0.7cm]
+%            \begin{block}{Supuestos}
+%            \fontsize{7pt}{11pt}\selectfont
+%                \vspace{0.2cm}
+%                Dinamica de la Caja: $C_{t+1} = C_t + I_t - E_t - \sum_i p_{i,t}$
+%                \newline
+%                Actualización de Saldo: $D_{i,t+1} = D_{i,t}-p_{i,t}$
+%                \newline
+%                Definición de Egreso: $E_t = G_t + Imp_t$
+%            \end{block}
+%            \begin{block}{Restricciones}
+%            \fontsize{7pt}{11pt}\selectfont
+%                \vspace{0.2cm}
+%                Caja y Liquidez: $C_{t} \ge L_{min}$
+%
+%            \end{block}
+%        \end{tcolorbox}
+%    \end{frame}
+
+%    \begin{frame}[t]{Proyección Iter. 1}
+%    \end{frame}
+
+    \begin{frame}[t]{Segunda Iteracion}
+        \begin{tcolorbox}
+            \begin{block}{Eq. 2}
+            \scriptsize
+                \vspace{.2cm}
+                    \[
+                        \min \sum_{t=1}^T (C_t - \bar{C})^2
+                    \]
+                    \[
+                        \min \alpha \sum (C_t - \bar{C})^2 + \beta \sum D_i
+                    \]
+                    \justifying{La ventaja de este modelo es que permite \hl{reducir la varianza de la caja} a través del tiempo sin perder los grados de libertad implícitos en el sistema de ecuaciones. Por el contrario, dichos grados de libertad son aprovechados por la optimización para seleccionar, entre las múltiples soluciones factibles, aquella que minimiza la variabilidad de la caja. Además, al definir un setpoint de caja $\bar{C}$, es posible analizar las consecuencias de aspirar a dicho nivel de ahorro a través del tiempo.Bajo esta formulación, la \hl{función objetivo pasa a ser cuadrática}, por lo que el Lagrangiano y las condiciones KKT toman la forma:
+
+                    \vspace{0.4cm}
+
+                    $L(x,\lambda)=\frac{1}{2}x^\top Qx+c^\top x+\lambda^\top(Ax-b)$
+
+                    $Qx + c + A^\top\lambda = 0$}
+            \end{block}
+        \end{tcolorbox}
+    \end{frame}
+
+    \begin{frame}[t]{Otros Enfoques}
+        \begin{tcolorbox}
+            \begin{block}{}
+            \scriptsize
+                \vspace{-.5cm}
+                    \textbf{Max de Resiliencia de Financiera}
+                    \[
+                    \max \min c_t
+                    \]
+
+                    \textbf{Maximizar crecimiento sostenible}
+
+                    \[
+                        \max \sum U_t - \alpha Var(C_t)
+                    \]
+
+                    \textbf{Minimizar el ratio deuda/caja}
+                    \[
+                    S_t = \frac{D_t}{C_t},   \min \sum S_t
+                    \]
+            \end{block}
+        \end{tcolorbox}
+    \end{frame}
+%    \begin{frame}[t]{Proyección Iter. 2}
+%    \end{frame}
+
+%    \begin{frame}
+%        \begin{tcolorbox}[grow to left by=0.6cm, grow to right by=0.7cm]
+%            \begin{block}{Supuestos}
+%            \fontsize{7pt}{11pt}\selectfont
+%                \vspace{0.2cm}
+%                Dinamica de la Caja: $C_{t+1} = C_t + I_t - E_t - \sum_i p_{i,t}$
+%                \newline
+%                Actualización de Saldo: $D_{i,t+1} = D_{i,t}-p_{i,t}$
+%                \newline
+%                Definición de Egreso: $E_t = G_t + Imp_t$
+%            \end{block}
+%            \begin{block}{Restricciones}
+%            \fontsize{7pt}{11pt}\selectfont
+%                \vspace{0.2cm}
+%                Caja y Liquidez: $C_{t} \ge L_{min}$
+%
+%            \end{block}
+%        \end{tcolorbox}
+%    \end{frame}
+
+    \begin{frame}[t]{Recomendaciones — Iter. 1}
+        \begin{tcolorbox}
+            \begin{block}{\fontsize{9pt}{5pt}\selectfont Salida del modelo $\min \sum_t \left[\sum_i x_i D_{i,t} - \alpha U_t\right]$}
+            \fontsize{7pt}{9pt}\selectfont
+            \vspace{0.2cm}
+            \justifying{Dado un conjunto de acreedores $\{d_1, d_2, \ldots, d_n\}$ con pesos $x_i$ proporcionales al costo de cada deuda,
+            el modelo distribuye el excedente de caja semanal entre pagos y utilidad retenida.
+            La recomendación operativa toma la forma:}
+            \vspace{0.1cm}
+            \resizebox{\textwidth}{!}{
+            \begin{tabular}{crrrrr}
+            \toprule
+            \textbf{Semana} & \textbf{Pagar AVV (\$)} & \textbf{Pagar Aceros Gutz (\$)} & \textbf{Pagar A. Guerrero (\$)} & \textbf{Utilidad Retenida (\$)} & \textbf{Estado} \\
+            \midrule
+            1 & 3{,}000 & 1{,}500 & 800 & 45{,}200 & \textcolor{green!60!black}{Operable} \\
+            2 & 1{,}000 & 500  & 0   & 12{,}000 & \textcolor{orange}{Ajustado} \\
+            3 & 0       & 0    & 0   & 5{,}800  & \textcolor{red}{Sin margen} \\
+            \ldots & \ldots & \ldots & \ldots & \ldots & \ldots \\
+            $T$ & $p_{1,T}$ & $p_{2,T}$ & $p_{3,T}$ & $U_T$ & --- \\
+            \bottomrule
+            \end{tabular}
+            }
+            \vspace{0.1cm}
+            \justifying{Cuando la utilidad retenida cae a niveles críticos, el modelo señala \textbf{suspender pagos} antes de comprometer la operación.
+            El parámetro $\alpha$ controla directamente cuándo ocurre ese punto de corte.}
+            \end{block}
+        \end{tcolorbox}
+    \end{frame}
+
+    \begin{frame}[t]{Recomendaciones — Iter. 2}
+       \begin{tcolorbox}
+           \begin{block}{\fontsize{9pt}{5pt}\selectfont Salida del modelo $\min\, \alpha\sum(C_t-\bar{C})^2 + \beta\sum D_i$}
+           \fontsize{7pt}{9pt}\selectfont
+           \vspace{0.2cm}
+           \justifying{El solver distribuye los pagos $p_{j,t}$ de modo que la caja se mantenga cerca de $\bar{C}$
+           semana a semana, reduciendo simultáneamente la deuda residual al final del horizonte $T$.}
+           \vspace{0.1cm}
+           \resizebox{\textwidth}{!}{
+           \begin{tabular}{crrrrrl}
+           \toprule
+           \textbf{Semana} & \textbf{Caja Proy. (\$)} & \textbf{vs $\bar{C}$ (\$)} & \textbf{Pagar AVV (\$)} & \textbf{Pagar Aceros (\$)} & \textbf{Pagar A.G. (\$)} & \textbf{Semáforo} \\
+           \midrule
+           1 & 420{,}000 & $+$20{,}000 & 3{,}000 & 1{,}200 & 600 & \textcolor{green!60!black}{$\bullet$ OK} \\
+           2 & 385{,}000 & $-$15{,}000 & 1{,}500 & 800   & 0   & \textcolor{green!60!black}{$\bullet$ OK} \\
+           3 & 210{,}000 & $-$190{,}000 & 0      & 0     & 0   & \textcolor{orange}{$\bullet$ Cuidado} \\
+           4 & 195{,}000 & $-$205{,}000 & 0      & 0     & 0   & \textcolor{red}{$\bullet$ Riesgo} \\
+           \ldots & \ldots & \ldots & \ldots & \ldots & \ldots & \ldots \\
+           $T$ & $C_T$ & $C_T - \bar{C}$ & $p_{1,T}$ & $p_{2,T}$ & $p_{3,T}$ & --- \\
+           \bottomrule
+           \end{tabular}
+           }
+           \vspace{0.1cm}
+           \justifying{Semáforo: \textcolor{green!60!black}{$\bullet$}~$C_t > 1.5\, L_{\min}$ \quad
+           \textcolor{orange}{$\bullet$}~$L_{\min} < C_t \leq 1.5\, L_{\min}$ \quad
+           \textcolor{red}{$\bullet$}~$C_t \leq L_{\min}$}
+           \end{block}
+       \end{tcolorbox}
+    \end{frame}
+
+    \begin{frame}[t]{Recomendaciones — Otros Enfoques}
+       \begin{columns}[t]
+           \begin{column}{0.48\textwidth}
+               \begin{tcolorbox}
+                   \begin{block}{\fontsize{8pt}{5pt}\selectfont Max Resiliencia: $\max \min_t C_t$}
+                   \fontsize{6.5pt}{9pt}\selectfont
+                   \vspace{0.1cm}
+                   \resizebox{\textwidth}{!}{
+                   \begin{tabular}{crrl}
+                   \toprule
+                   \textbf{Sem.} & \textbf{Caja (\$)} & \textbf{Pagos (\$)} & \textbf{Acción} \\
+                   \midrule
+                   1 & 430{,}000 & 5{,}000 & Normal \\
+                   2 & 410{,}000 & 4{,}000 & Normal \\
+                   3 & 198{,}000 & 0 & \textcolor{red}{Pausar pagos} \\
+                   4 & 350{,}000 & 3{,}000 & Retomar \\
+                   \ldots & \ldots & \ldots & \ldots \\
+                   \bottomrule
+                   \end{tabular}
+                   }
+                   \vspace{0.1cm}
+                   \justifying{Identifica la semana más crítica del horizonte y suspende pagos en ella para que el mínimo de caja sea lo más alto posible.}
+                   \end{block}
+               \end{tcolorbox}
+           \end{column}
+
+           \begin{column}{0.48\textwidth}
+               \begin{tcolorbox}
+                   \begin{block}{\fontsize{8pt}{5pt}\selectfont Ratio D/C: $\min \sum D_t/C_t$}
+                   \fontsize{6.5pt}{9pt}\selectfont
+                   \vspace{0.1cm}
+                   \resizebox{\textwidth}{!}{
+                   \begin{tabular}{crrrl}
+                   \toprule
+                   \textbf{Sem.} & \textbf{$D_t/C_t$} & \textbf{Pago (\$)} & \textbf{Meta 0.5} & \textbf{Estado} \\
+                   \midrule
+                   1 & 2.10 & 8{,}000 & $-$12~sem & \textcolor{red}{Alto} \\
+                   4 & 1.40 & 5{,}000 & $-$8~sem  & \textcolor{orange}{Medio} \\
+                   8 & 0.70 & 2{,}000 & $-$3~sem  & \textcolor{orange}{Medio} \\
+                   11 & 0.48 & 1{,}000 & \checkmark & \textcolor{green!60!black}{OK} \\
+                   \bottomrule
+                   \end{tabular}
+                   }
+                   \vspace{0.1cm}
+                   \justifying{Proyecta semanas restantes para alcanzar el ratio objetivo y el pago mínimo semanal necesario para lograrlo.}
+                   \end{block}
+               \end{tcolorbox}
+           \end{column}
+       \end{columns}
+   \end{frame}
+   \begin{frame}[t]{Recomendaciones — Otros Enfoques}
+       \begin{tcolorbox}
+           \begin{block}{\fontsize{9pt}{5pt}\selectfont
+               Salida del modelo $\max \sum U_t - \alpha\, \mathrm{Var}(C_t)$}
+           \fontsize{7pt}{9pt}\selectfont
+           \vspace{0.2cm}
+           \justifying{El modelo decide \textbf{cuánto pagar cada semana} buscando que la utilidad
+           retenida acumulada $\sum U_t$ sea la mayor posible, pero penalizando los
+           altibajos bruscos de caja mediante $\alpha\,Var(C_t)$.}
+           \vspace{0.1cm}
+           \resizebox{\textwidth}{!}{
+           \begin{tabular}{crrrrrl}
+           \toprule
+           \textbf{Semana} & \textbf{Caja Proy. (\$)} &
+           \textbf{$U_t$ Retenida (\$)} &
+           \textbf{Pagos Tot. (\$)} &
+           \textbf{$\sigma^2$ Acum.} &
+           \textbf{Decisión del Modelo} &
+           \textbf{Semáforo} \\
+           \midrule
+           1 & 400{,}000 & 32{,}000 & 3{,}500  & Baja  & Retener utilidad        & \textcolor{green!60!black}{$\bullet$ OK} \\
+           2 & 350{,}000 & 28{,}000 & 2{,}800  & Baja  & Retener utilidad        & \textcolor{green!60!black}{$\bullet$ OK} \\
+           3 & 900{,}000 & 8{,}000  & 42{,}000 & Alta  & Pagar — pico de ingreso & \textcolor{orange}{$\bullet$ Cuidado} \\
+           4 & 380{,}000 & 30{,}000 & 4{,}000  & Baja  & Retener utilidad        & \textcolor{green!60!black}{$\bullet$ OK} \\
+           5 & 210{,}000 & 4{,}000  & 1{,}000  & Media & Conservar caja          & \textcolor{red}{$\bullet$ Riesgo} \\
+           \ldots & \ldots & \ldots & \ldots & \ldots & \ldots & \ldots \\
+           $T$ & $C_T$ & $U_T$ & $\sum_i p_{i,T}$ & --- & --- & --- \\
+           \bottomrule
+           \end{tabular}
+           }
+           \vspace{0.1cm}
+           \justifying{Semáforo: \textcolor{green!60!black}{$\bullet$}~$\sigma^2$ baja, $U_t$ creciente \quad
+           \textcolor{orange}{$\bullet$}~Pico detectado, modelo interviene \quad
+           \textcolor{red}{$\bullet$}~Caja baja, modelo protege liquidez sobre utilidad}
+           \end{block}
+       \end{tcolorbox}
+   \end{frame}
+    \appendix
+    \begin{frame}[standout]
+            Apéndice
+    \end{frame}
+
+
+    \begin{frame}[t]{Logica Actual}
+        \begin{enumerate}
+            \item $E_t = G_t^{\text{oper}}$
+            \item $R_t = I_t + C_t - (G_t^{\text{oper}}+Imp_t)$
+            \item $P_t^{\text{Total}} = \max(0, R_t - L_{\min})$
+            \item $\min \sum_{t=1}^T \sum_i x_i D_{i, t}$
+        \end{enumerate}
+    \end{frame}
+\end{document}
