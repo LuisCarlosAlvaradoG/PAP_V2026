@@ -1,0 +1,180 @@
+
+# ============================================================
+#  PARÁMETROS DE PRUEBA (ajustar libremente en cada corrida)
+# ============================================================
+HORIZONTE = 8          # T, semanas de planeación
+L_MIN = round(max(saldo_actual * 0.1, 0.0), 2)   # caja mínima deseada
+
+I, E = obtener_proyeccion_base(df, HORIZONTE)
+C0 = saldo_actual
+conceptos = deudas.index.tolist()
+D0 = deudas.values.tolist()
+
+print(f"Horizonte: {HORIZONTE} semanas")
+print(f"L_min: {L_MIN:,.2f}")
+print(f"Ingreso proyectado/semana: {I[0]:,.2f}")
+print(f"Egreso proyectado/semana: {E[0]:,.2f}")
+print(f"C0: {C0:,.2f}")
+print(f"Conceptos con deuda: {conceptos}")
+print(f"D0: {[round(d,2) for d in D0]}")
+# ============================================================
+#  MODELO 5 — OPCIÓN A: Heurística mejorada
+# ============================================================
+def modelo5_opcion_a(D0, I, E, C0, L_min, T, agresividad=0.5, epsilon=1e-6):
+    """
+    Heurística secuencial mejorada para minimizar el ratio D_t/(C_t+L_min).
+
+    Diferencias clave vs. la versión original del dashboard:
+    - Prioriza liquidar POR COMPLETO las deudas más pequeñas primero (en vez de
+      repartir proporcionalmente al tamaño de cada deuda).
+    - Calcula y devuelve el ratio real D_t/(C_t+L_min) semana a semana.
+    - Guardia explícita: si no hay excedente sobre L_min, no se paga esa semana.
+
+    Retorna:
+        P: matriz (n, T) de pagos por concepto y semana
+        ratios: lista de longitud T con el ratio D_t/(C_t+L_min) tras el pago de esa semana
+        exito: bool, siempre True (es una heurística, no un solver)
+    """
+    n = len(D0)
+    IE = np.array(I, dtype=float) - np.array(E, dtype=float)
+    D_restante = np.array(D0, dtype=float)
+    orden_prioridad = np.argsort(D_restante)  # deudas más pequeñas primero
+
+    C = C0
+    P = np.zeros((n, T))
+    ratios = []
+
+    for t in range(T):
+        C_disponible = C + IE[t]
+        excedente = max(0.0, C_disponible - L_min)
+
+        pago_total = min(excedente * agresividad, D_restante.sum())
+
+        if pago_total > 0 and D_restante.sum() > 0:
+            restante_a_pagar = pago_total
+            for i in orden_prioridad:
+                if restante_a_pagar <= 0:
+                    break
+                abono = min(D_restante[i], restante_a_pagar)
+                P[i, t] = abono
+                D_restante[i] -= abono
+                restante_a_pagar -= abono
+
+        C = C_disponible - P[:, t].sum()
+        ratio_t = D_restante.sum() / (C + L_min + epsilon)
+        ratios.append(ratio_t)
+
+    return P, ratios, True
+# ============================================================
+#  MODELO 5 — OPCIÓN B: SLP (Sequential Linear Programming)
+# ============================================================
+def modelo5_opcion_b(D0, I, E, C0, L_min, T, max_iter=15, tol=1e-4, epsilon=1e-6):
+    """
+    Aproxima min Σ_t D_t/(C_t+L_min) mediante linealización sucesiva:
+
+    En cada iteración k, se linealiza el ratio D_t/(C_t+L_min) alrededor de la
+    solución actual (P^k) usando la derivada respecto a los pagos, y se resuelve
+    un LP para obtener P^(k+1). Se repite hasta que el cambio en el objetivo sea
+    menor a `tol` o se alcance `max_iter`.
+
+    El objetivo real (no lineal) se recalcula en cada iteración para verificar
+    convergencia real, no solo la convergencia del LP linealizado.
+
+    Retorna:
+        P: matriz (n, T) de pagos por concepto y semana
+        ratios: lista de longitud T con el ratio D_t/(C_t+L_min) de la solución final
+        exito: bool, True si el LP convergió en al menos una iteración
+    """
+    n = len(D0)
+    IE = np.array(I, dtype=float) - np.array(E, dtype=float)
+    cum_IE = np.cumsum(IE)
+    D0_arr = np.array(D0, dtype=float)
+
+    def caja(P):
+        pagos_sem = P.sum(axis=0)
+        return C0 + cum_IE - np.cumsum(pagos_sem)
+
+    def deuda_restante_por_semana(P):
+        # deuda total restante al final de cada semana t
+        pagos_acumulados = np.cumsum(P.sum(axis=0))
+        return D0_arr.sum() - pagos_acumulados
+
+    def objetivo_real(P):
+        C = caja(P)
+        D_t = deuda_restante_por_semana(P)
+        return np.sum(D_t / (C + L_min + epsilon))
+
+    # Punto de partida: repartir uniformemente la deuda entre las semanas
+    P_actual = np.tile(D0_arr[:, None] / T, (1, T))
+    obj_actual = objetivo_real(P_actual)
+
+    exito_alguna_iter = False
+
+    for _ in range(max_iter):
+        C = caja(P_actual)
+        D_t = deuda_restante_por_semana(P_actual)
+        denom = (C + L_min + epsilon)
+
+        # Gradiente aproximado del ratio respecto a un pago adicional en la semana tau
+        # para el concepto i: pagar en tau reduce D_t y aumenta C_t para todo t >= tau,
+        # así que el efecto marginal es acumulativo hacia adelante.
+        # d(ratio_t)/d(pago en tau) ≈ [-1/denom_t] si t>=tau (reduce deuda)
+        #                            + [D_t/denom_t^2] si t>=tau (aumenta caja, baja ratio)
+        costo_marginal = np.zeros((n, T))
+        for tau in range(T):
+            efecto = 0.0
+            for t in range(tau, T):
+                efecto += (-1.0 / denom[t]) + (D_t[t] / (denom[t] ** 2))
+            costo_marginal[:, tau] = efecto  # mismo efecto para cualquier concepto i en tau
+
+        c = costo_marginal.flatten()
+
+        nvars = n * T
+        A_ub, b_ub = [], []
+
+        # No exceder la deuda pendiente por concepto
+        for i in range(n):
+            row = np.zeros(nvars)
+            row[i * T:(i + 1) * T] = 1
+            A_ub.append(row)
+            b_ub.append(D0[i])
+
+        # Caja no negativa
+        for t in range(T):
+            row = np.zeros(nvars)
+            for i in range(n):
+                row[i * T: i * T + t + 1] = 1
+            A_ub.append(row)
+            b_ub.append(C0 + cum_IE[t])
+
+        # Piso de caja L_min (restricción dura, a diferencia de la Opción A)
+        for t in range(T):
+            row = np.zeros(nvars)
+            for i in range(n):
+                row[i * T: i * T + t + 1] = 1
+            A_ub.append(row)
+            b_ub.append(C0 + cum_IE[t] - L_min)
+
+        bounds = [(0, None)] * nvars
+        res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method="highs")
+
+        if not res.success:
+            break
+
+        P_nuevo = res.x.reshape(n, T)
+        obj_nuevo = objetivo_real(P_nuevo)
+
+        exito_alguna_iter = True
+
+        if abs(obj_actual - obj_nuevo) < tol:
+            P_actual = P_nuevo
+            obj_actual = obj_nuevo
+            break
+
+        P_actual, obj_actual = P_nuevo, obj_nuevo
+
+    C_final = caja(P_actual)
+    D_t_final = deuda_restante_por_semana(P_actual)
+    ratios = list(D_t_final / (C_final + L_min + epsilon))
+
+    return P_actual, ratios, exito_alguna_iter
