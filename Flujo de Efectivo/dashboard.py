@@ -1098,10 +1098,9 @@ if st.session_state.modulo_activo == "flujo":
                                                 sugerencia
                                             )
                                             st.rerun()
-                            if categoria_escrita:
-                                tipo = st.selectbox(
-                                    "Tipo", ["Ingreso", "Egreso"], index=1
-                                )
+                            tipo = st.selectbox(
+                                "Tipo", ["Ingreso", "Egreso"], index=1
+                            )
 
             if st.button("Guardar movimiento"):
                 if concepto == "":
