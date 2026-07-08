@@ -179,7 +179,7 @@ def generar_flujo(df):
         .reindex(flujo.columns, fill_value=0)
     )
     flujo_neto = total_ingresos - total_egresos
-    saldo_inicial = 0
+    saldo_inicial = 500000
     saldo = saldo_inicial + flujo_neto.cumsum()
 
     flujo.loc["TOTAL INGRESOS"] = total_ingresos
