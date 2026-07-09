@@ -10,10 +10,10 @@ from scipy.optimize import linprog, minimize
 # ============================================================
 #  CONFIGURACIÓN GENERAL
 # ============================================================
-ARCHIVO_DATOS = "Flujo_de_Efectivo\Datos_flujo_de_efectivo.xlsx"
-ARCHIVO_SALIDA = "Flujo_de_Efectivo\Flujo_de_efectivo.xlsx"
-ARCHIVO_PAGOS = "Flujo_de_Efectivo\Pagos_pendientes.xlsx"
-ARCHIVO_OPTIMIZACION = "Flujo_de_Efectivo\Optimizacion_de_pagos.xlsx"
+ARCHIVO_DATOS = "Flujo_de_Efectivo/Datos_flujo_de_efectivo.xlsx"
+ARCHIVO_SALIDA = "Flujo_de_Efectivo/Flujo_de_efectivo.xlsx"
+ARCHIVO_PAGOS = "Flujo_de_Efectivo/Pagos_pendientes.xlsx"
+ARCHIVO_OPTIMIZACION = "Flujo_de_Efectivo/Optimizacion_de_pagos.xlsx"
 
 MESES = {
     1: "enero",
