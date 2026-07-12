@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from scipy.optimize import linprog
+from scipy.optimize import linprog, curve_fit
 
 # ============================================================
 #  CONFIGURACIÓN GENERAL
@@ -263,129 +263,6 @@ def guardar_pagos(dfp):
 #  Implementación de los modelos descritos en el documento
 #  "Modelo de Optimización F.E. FV-Procesados"
 # ============================================================
-def filtrar_semanas_representativas(df, umbral_min_transacciones=None):
-    """Excluye del histórico, SOLO para efectos de proyección, cualquier semana que:
-        (a) todavía esté en curso (inicio_semana + 6 días >= hoy), o
-        (b) tenga muy pocas transacciones comparada con una semana normal --
-            es decir, no sea representativa de una semana típica de operación.
-
-    CORRECCIÓN (caso real): al probar el sistema, se inyectó un ingreso de
-    prueba de $500,000 como único movimiento de una semana. Esa semana ya
-    había "terminado" en el calendario (pasaba el filtro (a)), pero seguía sin
-    ser una semana real de operación -- un solo movimiento no son las 15-30
-    transacciones típicas de una semana normal. Si cae dentro de la ventana de
-    8 semanas que usa la media móvil, el filtro (a) por sí solo no la detecta,
-    e infla artificialmente la proyección futura. El filtro (b) generaliza la
-    corrección para que esto no dependa de en qué semana caiga el movimiento.
-
-    NOTA IMPORTANTE: este filtro solo debe aplicarse a la PROYECCIÓN futura
-    (`obtener_proyeccion`), nunca al saldo actual (`calcular_saldo_actual`) --
-    el saldo actual debe reflejar TODO lo registrado hasta hoy, representativo
-    o no (si de verdad entró dinero, ya es saldo real, sin importar si esa
-    semana "se ve típica" o no).
-    """
-    df = df.copy()
-    hoy = pd.Timestamp.today().normalize()
-    fin_de_semana = df["inicio_semana"] + pd.Timedelta(days=6)
-    df = df.loc[fin_de_semana < hoy].copy()
-
-    if df.empty:
-        return df
-
-    conteo = df.groupby("inicio_semana").size()
-    mediana = conteo.median()
-    if umbral_min_transacciones is None:
-        umbral_min_transacciones = max(5, mediana * 0.4)
-    semanas_validas = conteo[conteo >= umbral_min_transacciones].index
-    return df[df["inicio_semana"].isin(semanas_validas)].copy()
-
-
-def obtener_proyeccion(df, horizonte):
-    """
-    Proyección adaptativa de ingresos y egresos semanales.
-
-    Estrategia automática según la cantidad de semanas históricas:
-        < 8 semanas       : promedio simple de todo el historial.
-        8 a 51 semanas    : media móvil ponderada de las últimas 8 semanas.
-        >= 52 semanas     : media móvil ponderada + factor estacional por
-                            semana del año (ISO week).
-
-    Usa `filtrar_semanas_representativas` antes de construir el histórico
-    (ver esa función para el detalle de por qué es necesario).
-
-    Siempre devuelve dos listas de longitud `horizonte`:
-        I : ingresos proyectados por semana
-        E : egresos proyectados por semana
-    """
-    df = filtrar_semanas_representativas(df)
-    df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
-
-    resumen = df.pivot_table(
-        index="inicio_semana",
-        columns="tipo",
-        values="importe",
-        aggfunc="sum",
-        fill_value=0,
-    ).sort_index()
-
-    for col in ["Ingreso", "Egreso"]:
-        if col not in resumen.columns:
-            resumen[col] = 0.0
-
-    ingreso_hist = resumen["Ingreso"].values.astype(float)
-    egreso_hist = resumen["Egreso"].values.astype(float)
-    n_semanas = len(ingreso_hist)
-
-    pesos = np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=float)
-    pesos = pesos / pesos.sum()
-
-    def wma(serie):
-        ultimas = serie[-8:]
-        n = len(ultimas)
-        pesos_ajustados = pesos[-n:]
-        pesos_ajustados = pesos_ajustados / pesos_ajustados.sum()
-        return np.dot(ultimas, pesos_ajustados)
-
-    factores_ingreso = None
-    factores_egreso = None
-    if n_semanas >= 52:
-        semanas_iso = resumen.index.isocalendar().week.values
-
-        def calcular_factores(serie):
-            df_temp = pd.DataFrame({"semana": semanas_iso, "valor": serie})
-            promedio_semana = df_temp.groupby("semana")["valor"].mean()
-            global_avg = serie.mean()
-            if global_avg == 0:
-                return {s: 1.0 for s in range(1, 54)}
-            return (promedio_semana / global_avg).to_dict()
-
-        factores_ingreso = calcular_factores(ingreso_hist)
-        factores_egreso = calcular_factores(egreso_hist)
-
-    if n_semanas == 0:
-        return [0.0] * horizonte, [0.0] * horizonte
-
-    ultima_fecha = resumen.index[-1]
-    fechas_futuras = pd.date_range(
-        start=ultima_fecha + pd.Timedelta(weeks=1), periods=horizonte, freq="W"
-    )
-    semanas_futuras = fechas_futuras.isocalendar().week
-
-    def proyectar(serie_hist, factores):
-        if n_semanas < 8:
-            base = serie_hist.mean()
-            return np.full(horizonte, base)
-        base = wma(serie_hist)
-        if n_semanas < 52 or factores is None:
-            return np.full(horizonte, base)
-        proy = np.array([base * factores.get(s, 1.0) for s in semanas_futuras])
-        return proy
-
-    I = proyectar(ingreso_hist, factores_ingreso).tolist()
-    E = proyectar(egreso_hist, factores_egreso).tolist()
-    return I, E
-
-
 def obtener_deudas_pendientes(dfp):
     """Agrupa la deuda pendiente por concepto/proveedor (D_i).
 
@@ -414,102 +291,163 @@ def calcular_saldo_actual(df):
     return float(ingresos - egresos)
 
 
-def modelo_a_optimizacion_global(
-    D0, I, E, C0, L_min, L_survival, T, pago_max_frac_ingreso=0.5, eps=1e-6
-):
+def obtener_proyeccion_ponderada(df, horizonte, ventana=8):
     """
-    Modelo A - Optimización global de caja (dos etapas), DECISIÓN LIBRE.
+    Proyección simple de ingresos y egresos semanales con media móvil
+    PONDERADA, ventana de las últimas `ventana` semanas de historial (por
+    defecto 8). A diferencia de un promedio simple, las semanas más
+    recientes pesan más: con ventana=8 los pesos son 1,2,3,4,5,6,7,8 (la
+    semana más vieja de las 8 pesa 1, la más reciente pesa 8), normalizados
+    para sumar 1. Si hay menos semanas de historial que la ventana, se usan
+    las que haya y los pesos se reescalan a esa cantidad.
 
-    HISTORIAL DEL DISEÑO: en versiones anteriores, este modelo recibía un
-    presupuesto de pago FIJO (p. ej. "paga el 100% de la deuda"), porque con
-    una caja estructuralmente negativa, cualquier piso positivo (L_survival)
-    era matemáticamente imposible de alcanzar como restricción dura -- el
-    problema se volvía infactible sin importar el pago, así que había que
-    decírselo de antemano.
+    Antes de calcular, se excluye únicamente la semana en curso (todavía no
+    termina, así que no es un dato completo).
 
-    Con una caja inicial ya positiva (por ejemplo, tras una inyección de
-    capital), L_survival SÍ es alcanzable como restricción dura real. Esto
-    permite regresar al diseño original: el modelo YA NO recibe un presupuesto
-    fijo -- decide por sí mismo cuánta deuda pagar, maximizando el total
-    pagado sin que la caja baje nunca del piso de emergencia (L_survival).
-    L_min (el colchón cómodo) ya no es obligatorio, pero se usa como
-    desempate suave para escoger, entre varios calendarios de pago igual de
-    buenos, el que más proteja ese colchón.
+    El promedio ponderado resultante (uno para ingresos, uno para egresos)
+    se aplica de forma constante a cada una de las próximas `horizonte`
+    semanas -- no hay estacionalidad ni otros ajustes adicionales.
 
-    Etapa A (QP) - decide CUÁNTO pagar en total cada semana, maximizando la
-    deuda total pagada sujeta a C[t] >= L_survival (restricción dura) y a un
-    tope semanal realista.
+    Devuelve dos listas de longitud `horizonte`:
+        I : ingresos proyectados por semana (constante)
+        E : egresos proyectados por semana (constante)
+    """
+    df = df.copy()
+    df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
 
-    Etapa B (snowball estricto): reparte el calendario de pagos ya decidido
-    entre los conceptos de deuda, de la más chica a la más grande, saldando
-    cada una por completo antes de tocar la siguiente.
+    hoy = pd.Timestamp.today().normalize()
+    fin_de_semana = df["inicio_semana"] + pd.Timedelta(days=6)
+    df = df.loc[fin_de_semana < hoy].copy()
 
-    Si L_survival no es alcanzable (p. ej. la caja sigue siendo negativa),
-    el problema será infactible y se reporta `exito=False` -- en ese caso, la
-    caja inicial no alcanza ni para sobrevivir sin pagar nada, y hace falta
-    revisar los datos o el saldo inicial antes de pedirle al modelo pagar deuda.
+    if df.empty:
+        return [0.0] * horizonte, [0.0] * horizonte
+
+    resumen = df.pivot_table(
+        index="inicio_semana", columns="tipo", values="importe",
+        aggfunc="sum", fill_value=0,
+    ).sort_index()
+
+    for col in ["Ingreso", "Egreso"]:
+        if col not in resumen.columns:
+            resumen[col] = 0.0
+
+    ingreso_hist = resumen["Ingreso"].values.astype(float)
+    egreso_hist = resumen["Egreso"].values.astype(float)
+
+    pesos_base = np.arange(1, ventana + 1, dtype=float)
+
+    def wma(serie):
+        ultimas = serie[-ventana:]
+        n = len(ultimas)
+        pesos = pesos_base[-n:]
+        pesos = pesos / pesos.sum()
+        return float(np.dot(ultimas, pesos))
+
+    ingreso_prom = wma(ingreso_hist)
+    egreso_prom = wma(egreso_hist)
+
+    I = [ingreso_prom] * horizonte
+    E = [egreso_prom] * horizonte
+    return I, E
+
+
+def modelo_a_pareto(D0, I, E, C0, L_rojo, T, n_candidatos=2001):
+    """
+    Modelo A - Frontera de Pareto / distancia al punto ideal (TOPSIS simplificado).
+
+    Responde una sola pregunta -- "de la caja que tengo ahora mismo (C0),
+    ¿cuánto le pago a la deuda pendiente (D0) EN TOTAL, de una sola vez?" --
+    comparando el trade-off Caja-vs-Deuda como una frontera de Pareto, y
+    escogiendo el punto más cercano al ideal.
+
+    Usa la proyección (I, E, con media móvil ponderada de 8 semanas) para no dejar que el pago
+    hoy hunda la caja proyectada por debajo del piso rojo dentro del
+    horizonte T, pero SIEMPRE reporta dos cifras de caja por separado:
+        - caja_resultante  : cómo queda la caja justo después de pagar hoy,
+                              SIN proyección (C0 - pago).
+        - caja_proyectada  : cómo se ve esa caja al final del horizonte T,
+                              sumando el pago Y la proyección de ingresos y
+                              egresos (C0 - pago + K), donde K es el flujo
+                              neto proyectado acumulado a T semanas.
+
+    Cómo funciona, paso a paso:
+      1. Se arma una lista de montos de pago candidatos, de $0 hasta un tope
+         máximo (el más restrictivo entre: la deuda total, y el monto que
+         agotaría la caja PROYECTADA justo hasta el piso rojo/de emergencia
+         -- nunca se considera un pago que cruce ese piso al final de T
+         semanas).
+      2. Para cada candidato, se calcula la Caja proyectada resultante y la
+         Deuda restante.
+      3. El "punto ideal" es el mejor valor observado de cada criterio por
+         separado: la Caja proyectada más alta posible (pagar $0) y la
+         Deuda más baja posible (pagar el tope máximo) -- un punto que en
+         la práctica ningún candidato alcanza en ambos criterios a la vez.
+      4. Se mide qué tan lejos está cada candidato de ese punto ideal
+         (distancia euclidiana en el plano Caja-Deuda), y se elige el
+         candidato con la menor distancia.
+
+    Como la Caja y la Deuda se mueven exactamente $1 por cada $1 pagado, el
+    punto más cercano al ideal siempre resulta ser la MITAD del tope máximo
+    considerado -- ni el extremo de no pagar nada, ni el extremo de pagar
+    todo lo posible.
+
+    Una vez decidido el monto total óptimo, se reparte entre las deudas
+    individuales con snowball estricto (la más chica primero).
+
+    Retorna: pago_por_concepto (array), diagnostico (dict con pago_total,
+    caja_resultante, caja_proyectada, deuda_resultante,
+    pago_max_considerado, K), exito (bool).
     """
     D0 = np.asarray(D0, dtype=float)
     n = len(D0)
-    D_total0 = D0.sum()
+    D0_total = D0.sum()
     I_arr = np.asarray(I, dtype=float)
-    tope_semanal = pago_max_frac_ingreso * I_arr
+    E_arr = np.asarray(E, dtype=float)
 
-    alpha_tiebreak = (
-        1.0 / (L_min**2) if L_min > 0 else 1.0 / (max(abs(C0), D_total0, 1.0) ** 2)
+    K = float(np.sum(I_arr[:T] - E_arr[:T]))  # flujo neto proyectado acumulado a T semanas
+
+    pago_max = max(0.0, min(D0_total, C0 + K - L_rojo))
+
+    if pago_max <= 0:
+        # Ni pagando $0 se respeta el piso rojo en la caja proyectada --
+        # infactible, hace falta revisar el saldo actual, la proyección o
+        # el umbral rojo antes de pedir pagar deuda.
+        return np.zeros(n), {}, False
+
+    candidatos = np.linspace(0.0, pago_max, n_candidatos)
+    caja_proyectada_cand = C0 - candidatos + K
+    deuda_cand = D0_total - candidatos
+
+    caja_ideal = caja_proyectada_cand.max()
+    deuda_ideal = deuda_cand.min()
+    distancias = np.sqrt(
+        (deuda_cand - deuda_ideal) ** 2 + (caja_proyectada_cand - caja_ideal) ** 2
     )
+    idx_opt = int(np.argmin(distancias))
+    pago_optimo = float(candidatos[idx_opt])
 
-    Pago = cp.Variable(T, nonneg=True)
-    C = cp.Variable(T + 1)
-    D_total = cp.Variable(T + 1)
-
-    constraints = [C[0] == C0, D_total[0] == D_total0]
-    for t in range(1, T + 1):
-        idx = t - 1
-        constraints.append(C[t] == C[t - 1] + I[idx] - E[idx] - Pago[idx])
-        constraints.append(D_total[t] == D_total[t - 1] - Pago[idx])
-        constraints.append(D_total[t] >= 0)
-        constraints.append(Pago[idx] <= D_total[t - 1])
-        constraints.append(Pago[idx] <= tope_semanal[idx])
-        constraints.append(C[t] >= L_survival)  # restricción DURA real (ya alcanzable)
-
-    deficit_min = cp.pos(L_min - C[1:])  # desempate suave, no obligatorio
-    objetivo = cp.Maximize(cp.sum(Pago) - alpha_tiebreak * cp.sum_squares(deficit_min))
-
-    prob = cp.Problem(objetivo, constraints)
-    prob.solve(solver=cp.OSQP, max_iter=50000, eps_abs=1e-6, eps_rel=1e-6)
-
-    if (
-        prob.status not in ["optimal", "optimal_inaccurate", "user_limit"]
-        or Pago.value is None
-    ):
-        return np.zeros((n, T)), [0.0] * T, False
-
-    pago_sem = np.clip(Pago.value, 0, None)
-    C_opt = C.value
-
+    # Snowball: reparte el monto total decidido entre las deudas individuales
     D_restante = D0.copy()
     orden = np.argsort(D_restante)
-    P = np.zeros((n, T))
-    for t in range(T):
-        restante_a_pagar = pago_sem[t]
-        for i in orden:
-            if restante_a_pagar <= 0:
-                break
-            abono = min(D_restante[i], restante_a_pagar)
-            P[i, t] = abono
-            D_restante[i] -= abono
-            restante_a_pagar -= abono
+    pago_por_concepto = np.zeros(n)
+    restante = pago_optimo
+    for i in orden:
+        if restante <= 0:
+            break
+        abono = min(D_restante[i], restante)
+        pago_por_concepto[i] = abono
+        restante -= abono
 
-    D_track = D0.copy()
-    ratios = []
-    for t in range(T):
-        D_track = D_track - P[:, t]
-        denom = C_opt[t + 1] + L_min
-        denom = denom if abs(denom) > eps else eps
-        ratios.append(float(D_track.sum() / denom))
-
-    return P, ratios, True
+    diagnostico = dict(
+        pago_total=pago_optimo,
+        caja_resultante=float(C0 - pago_optimo),
+        caja_proyectada=float(caja_proyectada_cand[idx_opt]),
+        deuda_resultante=float(deuda_cand[idx_opt]),
+        pago_max_considerado=pago_max,
+        distancia=float(distancias[idx_opt]),
+        K=K,
+    )
+    return pago_por_concepto, diagnostico, True
 
 
 def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
@@ -555,15 +493,10 @@ def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
 
     if np.all(F == 0):
         return dict(
-            m_opt=m_base,
-            m_base=m_base,
-            ganancia=0.0,
-            C_opt=C_base.tolist(),
-            E_opt=E.tolist(),
-            x_opt={},
-            exito=True,
+            m_opt=m_base, m_base=m_base, ganancia=0.0,
+            C_opt=C_base.tolist(), E_opt=E.tolist(), x_opt={}, exito=True,
             t_crit=int(np.argmin(C_base[1:])) + 1,
-            K_star=(np.max(E) / np.sum(E)) if np.sum(E) > 0 else np.nan,
+            K_star=(np.max(E) / np.sum(E)) if np.sum(E) > 0 else np.nan
         )
 
     pairs, idx_map, n_x = [], {}, 0
@@ -617,22 +550,11 @@ def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
     b_ub = np.array(b_ub) if b_ub else None
     bounds = [(0, None)] * n_x + [(None, None)]
 
-    res = linprog(
-        c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs"
-    )
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
 
     if not res.success:
-        return dict(
-            m_opt=np.nan,
-            m_base=m_base,
-            ganancia=np.nan,
-            C_opt=[],
-            E_opt=[],
-            x_opt={},
-            exito=False,
-            t_crit=None,
-            K_star=np.nan,
-        )
+        return dict(m_opt=np.nan, m_base=m_base, ganancia=np.nan, C_opt=[], E_opt=[],
+                    x_opt={}, exito=False, t_crit=None, K_star=np.nan)
 
     x_sol = res.x[:n_x]
     m_opt = res.x[idx_m]
@@ -651,32 +573,13 @@ def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
     sum_E_opt = np.sum(E_opt)
     K_star = np.max(E_opt) / sum_E_opt if sum_E_opt > 0 else np.nan
 
-    return dict(
-        m_opt=m_opt,
-        m_base=m_base,
-        ganancia=float(m_opt - m_base),
-        C_opt=C_opt.tolist(),
-        E_opt=E_opt.tolist(),
-        x_opt=x_opt,
-        exito=True,
-        t_crit=t_crit,
-        K_star=K_star,
-    )
+    return dict(m_opt=m_opt, m_base=m_base, ganancia=float(m_opt - m_base),
+                C_opt=C_opt.tolist(), E_opt=E_opt.tolist(), x_opt=x_opt,
+                exito=True, t_crit=t_crit, K_star=K_star)
 
 
-def modelo_b_ratio_pago(
-    D0,
-    I,
-    E,
-    C0,
-    T,
-    L_min=200_000.0,
-    L_survival=10_000.0,
-    pago_max_frac_ingreso=0.5,
-    D_crit=5.0,
-    piso_agres=0.05,
-    epsilon=1e-6,
-):
+def modelo_b_ratio_pago(D0, I, E, C0, T, L_min=200_000.0, L_survival=10_000.0,
+                         pago_max_frac_ingreso=0.5, D_crit=5.0, piso_agres=0.05, epsilon=1e-6):
     """
     Modelo B - Ratio de Pago (heurística snowball con estrés dinámico), DECISIÓN LIBRE.
 
@@ -719,9 +622,7 @@ def modelo_b_ratio_pago(
         excedente = max(0.0, C_disp - L_dyn)
 
         tope_semana = pago_max_frac_ingreso * I[t]
-        pago_total = max(
-            0.0, min(excedente * agresividad, tope_semana, D_restante.sum())
-        )
+        pago_total = max(0.0, min(excedente * agresividad, tope_semana, D_restante.sum()))
 
         if pago_total > 0:
             orden = np.argsort(D_restante)
@@ -742,33 +643,32 @@ def modelo_b_ratio_pago(
     return P, ratios, True
 
 
-def construir_tabla_modelo(P, ratios, conceptos, I, E, C0, L_min):
-    """Tabla de recomendación semana a semana, compartida por Modelo A y Modelo B
-    (ambos reparten pagos por concepto de deuda)."""
-    n, T = P.shape
-    IE = np.array(I, dtype=float) - np.array(E, dtype=float)
-    pagos_sem = P.sum(axis=0)
-    C = C0 + np.cumsum(IE) - np.cumsum(pagos_sem)
-    U = IE - pagos_sem
-
+def construir_tabla_lista_pagos(pago_por_concepto, conceptos):
+    """Tabla de recomendación SIMPLE: una lista de "Concepto | Pago Recomendado",
+    sin desglose semanal -- ambos modelos (A y B) ahora responden "cuánto pagarle
+    a cada quien", no "cuándo, semana por semana". Mantiene el orden de menor a
+    mayor deuda (mismo criterio usado en toda la app) para que sea fácil ver de
+    un vistazo cuáles se alcanzan a liquidar por completo."""
     filas = []
-    for t in range(T):
-        fila = {"Semana": t + 1}
-        for i, concepto in enumerate(conceptos):
-            fila[f"Pagar {concepto} ($)"] = round(float(P[i, t]), 2)
-        fila["Utilidad/Retenida ($)"] = round(float(U[t]), 2)
-        fila["Caja Proyectada ($)"] = round(float(C[t]), 2)
-        fila["Ratio D/C"] = round(float(ratios[t]), 4)
-        if C[t] <= L_min:
-            estado = "Sin margen"
-        elif C[t] <= L_min * 1.5:
-            estado = "Ajustado"
-        else:
-            estado = "Operable"
-        fila["Estado"] = estado
-        filas.append(fila)
-
+    for concepto, pago in zip(conceptos, pago_por_concepto):
+        filas.append({
+            "Concepto": concepto,
+            "Pago Recomendado ($)": round(float(pago), 2),
+        })
     return pd.DataFrame(filas)
+
+
+def clasificar_caja(valor, verde, amarillo, rojo):
+    """Clasifica un nivel de caja en el semáforo de 3 zonas y devuelve
+    (etiqueta, color, cuánto falta/sobra hasta el siguiente umbral)."""
+    if valor >= verde:
+        return "🟢 Verde", "green", valor - verde
+    elif valor >= amarillo:
+        return "🟡 Amarillo", "orange", valor - amarillo
+    elif valor >= rojo:
+        return "🔴 Rojo", "red", valor - rojo
+    else:
+        return "⚫ Crítico (bajo el piso de emergencia)", "black", valor - rojo
 
 
 def construir_tabla_modelo2_resiliencia(res, L_min=None, L_survival=None):
@@ -784,15 +684,11 @@ def construir_tabla_modelo2_resiliencia(res, L_min=None, L_survival=None):
     if not res["exito"]:
         return pd.DataFrame({"Error": ["Optimización fallida"]})
     T_mas_1 = len(res["C_opt"])
-    df_tabla = pd.DataFrame(
-        {
-            "Semana": [str(t) for t in range(T_mas_1)],
-            "Caja": res["C_opt"],
-            "Egreso_reprogramado": [
-                res["E_opt"][t - 1] if t > 0 else np.nan for t in range(T_mas_1)
-            ],
-        }
-    )
+    df_tabla = pd.DataFrame({
+        "Semana": [str(t) for t in range(T_mas_1)],
+        "Caja": res["C_opt"],
+        "Egreso_reprogramado": [res["E_opt"][t - 1] if t > 0 else np.nan for t in range(T_mas_1)],
+    })
     filas_metricas = [
         ("---", np.nan),
         ("Piso SIN reprogramar (m_base)", res["m_base"]),
@@ -804,16 +700,12 @@ def construir_tabla_modelo2_resiliencia(res, L_min=None, L_survival=None):
     if L_min is not None:
         filas_metricas.append(("L_min (colchón cómodo, referencia)", L_min))
     if L_survival is not None:
-        filas_metricas.append(
-            ("L_survival (piso de emergencia, referencia)", L_survival)
-        )
-    metricas = pd.DataFrame(
-        {
-            "Semana": [f[0] for f in filas_metricas],
-            "Caja": [f[1] for f in filas_metricas],
-            "Egreso_reprogramado": [np.nan] * len(filas_metricas),
-        }
-    )
+        filas_metricas.append(("L_survival (piso de emergencia, referencia)", L_survival))
+    metricas = pd.DataFrame({
+        "Semana": [f[0] for f in filas_metricas],
+        "Caja": [f[1] for f in filas_metricas],
+        "Egreso_reprogramado": [np.nan] * len(filas_metricas),
+    })
     return pd.concat([df_tabla, metricas], ignore_index=True)
 
 
@@ -1717,6 +1609,7 @@ elif st.session_state.modulo_activo == "pagos":
                 )
 
     # ---------------- OPTIMIZACIÓN DE PAGOS ----------------
+    # ---------------- OPTIMIZACIÓN DE PAGOS (reorganizado) ----------------
     elif seccion_p == "optimizar":
         deudas = obtener_deudas_pendientes(dfp)
 
@@ -1726,6 +1619,7 @@ elif st.session_state.modulo_activo == "pagos":
                 "Registra deudas en 'Agregar deuda' primero."
             )
         else:
+            # ── 1. RECOPILATORIO DE DEUDA ─────────────────────────────
             with st.container(border=True):
                 st.caption("Deudas pendientes consideradas (D_i), sumadas por concepto")
                 st.caption(
@@ -1736,268 +1630,122 @@ elif st.session_state.modulo_activo == "pagos":
                     deudas.rename("Importe pendiente ($)"), use_container_width=True
                 )
 
-                saldo_actual = calcular_saldo_actual(df)
-                deuda_total = float(deudas.sum())
+            # ── 2. OPTIMIZADOR (MODELO A – PARETO) ─────────────────────
+            with st.container(border=True):
+                st.subheader("Optimización de pagos — Frontera de Pareto x Media Movil Ponderada")
+                st.caption(
+                    "Compara distintos montos posibles de pago total y elige el más "
+                    "cercano al punto ideal (máxima caja, mínima deuda). Reparte ese "
+                    "monto con snowball. La proyección de ingresos y egresos usa una "
+                    "media móvil ponderada de las últimas 8 semanas de historial "
+                    "(las semanas más recientes pesan más)."
+                )
 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     horizonte = st.number_input(
-                        "Horizonte de planeación (semanas, T)",
-                        min_value=2,
+                        "Horizonte de proyección (semanas, T)",
+                        min_value=1,
                         max_value=52,
-                        value=8,
+                        value=12,
                         step=1,
                     )
                 with col2:
-                    L_min = st.number_input(
-                        "Colchón cómodo (L_min)",
+                    umbral_verde = st.number_input(
+                        "Umbral verde (colchón cómodo)",
                         min_value=0.0,
                         value=200_000.0,
                         step=500.0,
-                        help="Nivel de caja con el que la operación está tranquila. Se usa "
-                        "como referencia/desempate suave, no es obligatorio.",
                     )
                 with col3:
-                    L_survival = st.number_input(
-                        "Piso de emergencia (L_survival)",
+                    umbral_amarillo = st.number_input(
+                        "Umbral amarillo (precaución)",
                         min_value=0.0,
-                        value=10_000.0,
+                        value=50_000.0,
                         step=500.0,
-                        help="Mínimo tolerable, nunca se cruza. Si la caja proyectada no "
-                        "alcanza para mantenerse por encima de este piso ni pagando $0 de "
-                        "deuda, el Modelo A no encontrará solución factible -- eso es una "
-                        "señal real de que hace falta revisar el saldo inicial o la "
-                        "proyección antes de pedirle al modelo pagar deuda.",
+                    )
+                with col4:
+                    umbral_rojo = st.number_input(
+                        "Umbral rojo (piso de emergencia)",
+                        min_value=0.0,
+                        value=5_000.0,
+                        step=500.0,
                     )
 
-                st.markdown('<div class="regla-marca"></div>', unsafe_allow_html=True)
-
-                modelo = st.selectbox(
-                    "Modelo de optimización",
-                    [
-                        "Modelo A — Optimización Global (decide cuánta deuda pagar maximizando el total, sin cruzar el piso de emergencia)",
-                        "Modelo B — Ratio de Pago (paga solo cuando hay excedente real de caja, a un ritmo que depende del estrés)",
-                    ],
+                saldo_actual = calcular_saldo_actual(df)
+                I_proy, E_proy = obtener_proyeccion_ponderada(df, horizonte, ventana=8)
+                st.metric("Saldo actual (C0)", moneda(saldo_actual))
+                st.caption(
+                    f"Proyección media móvil ponderada (8 sem.): {moneda(I_proy[0])}/semana "
+                    f"de ingreso, {moneda(E_proy[0])}/semana de egreso (las semanas más "
+                    f"recientes pesan más), aplicado a las próximas {horizonte} semanas."
                 )
 
-                if modelo.startswith("Modelo A"):
-                    st.caption(
-                        "Ya no recibe un presupuesto fijo: decide por sí mismo cuánta deuda "
-                        "pagar, maximizando el total pagado sin que la caja cruce nunca el "
-                        "piso de emergencia. Reparte el pago con snowball estricto."
-                    )
-                else:
-                    st.caption(
-                        "Cada semana calcula si hay excedente real de caja por encima de un "
-                        "piso dinámico (entre el piso de emergencia y el colchón cómodo, "
-                        "según el estrés), y paga una fracción de ese excedente -- puede "
-                        "pagar $0 varias semanas si no hay margen real. Snowball estricto."
-                    )
-
-                calcular = st.button("Calcular recomendaciones")
-
-            if calcular:
-                I, E = obtener_proyeccion(df, horizonte)
-                C0 = saldo_actual
                 conceptos = deudas.index.tolist()
                 D0 = deudas.values.tolist()
 
-                if modelo.startswith("Modelo A"):
-                    P, ratios, exito = modelo_a_optimizacion_global(
-                        D0, I, E, C0, L_min, L_survival, horizonte
-                    )
-                else:
-                    P, ratios, exito = modelo_b_ratio_pago(
-                        D0, I, E, C0, horizonte, L_min=L_min, L_survival=L_survival
-                    )
-
-                tabla = (
-                    construir_tabla_modelo(P, ratios, conceptos, I, E, C0, L_min)
-                    if exito
-                    else None
+                pago_por_concepto, diag, exito = modelo_a_pareto(
+                    D0, I_proy, E_proy, saldo_actual, umbral_rojo, horizonte
                 )
 
-                if not exito or tabla is None:
+                if not exito:
                     st.error(
-                        "El modelo no encontró una solución factible: dado el saldo inicial "
-                        "y la proyección actuales, no existe forma de mantener la caja por "
-                        "encima del piso de emergencia ni pagando $0 de deuda. Revisa el "
-                        "saldo inicial (o usa el ajuste manual de arriba), el horizonte, o "
-                        "el piso de emergencia."
+                        "El modelo no encontró una solución factible: con el saldo "
+                        "actual y la proyección a este horizonte, ni pagando $0 de "
+                        "deuda se respeta el piso rojo. Revisa el saldo actual, el "
+                        "horizonte o el umbral rojo."
                     )
-                    st.session_state.pop("tabla_optimizacion", None)
                 else:
-                    st.session_state["tabla_optimizacion"] = tabla
-                    st.session_state["modelo_optimizacion"] = modelo
-                    st.session_state["proyeccion_optimizacion"] = (
-                        f"Proyección adaptativa (excluye semanas en curso o no "
-                        f"representativas): ingreso ≈ {moneda(I[0])}/semana, "
-                        f"egreso ≈ {moneda(E[0])}/semana, caja inicial {moneda(C0)}."
+                    pago_total = diag["pago_total"]
+                    caja_resultante = diag["caja_resultante"]
+                    caja_proyectada = diag["caja_proyectada"]
+                    deuda_resultante = diag["deuda_resultante"]
+
+                    zona_result, _, delta_result = clasificar_caja(
+                        caja_resultante, umbral_verde, umbral_amarillo, umbral_rojo
+                    )
+                    zona_proy, _, delta_proy = clasificar_caja(
+                        caja_proyectada, umbral_verde, umbral_amarillo, umbral_rojo
                     )
 
-            if "tabla_optimizacion" in st.session_state:
-                st.write("")
-                st.caption(
-                    f"Recomendación generada — {st.session_state['modelo_optimizacion']}"
-                )
-                st.caption(st.session_state["proyeccion_optimizacion"])
-                with st.container(border=True):
-                    st.dataframe(
-                        st.session_state["tabla_optimizacion"],
-                        use_container_width=True,
-                        hide_index=True,
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Pago total recomendado", moneda(pago_total))
+                    c2.metric("Caja resultante (solo el pago)", moneda(caja_resultante))
+                    c3.metric(f"Caja proyectada (a {horizonte} sem.)", moneda(caja_proyectada))
+                    c4.metric("Deuda restante", moneda(deuda_resultante))
+
+                    st.markdown(
+                        f"**Semáforo caja resultante (justo después de pagar): {zona_result}** "
+                        f"({'faltan' if delta_result < 0 else 'sobran'} "
+                        f"{moneda(abs(delta_result))} respecto al umbral de esa zona)"
+                    )
+                    st.markdown(
+                        f"**Semáforo caja proyectada (a {horizonte} semanas): {zona_proy}** "
+                        f"({'faltan' if delta_proy < 0 else 'sobran'} "
+                        f"{moneda(abs(delta_proy))} respecto al umbral de esa zona)"
                     )
 
-                with pd.ExcelWriter(ARCHIVO_OPTIMIZACION, engine="openpyxl") as writer:
-                    st.session_state["tabla_optimizacion"].to_excel(
-                        writer, sheet_name="Optimización", index=False
-                    )
-                    ws = writer.sheets["Optimización"]
-                    aplicar_formato_tabla(ws)
-                    for row in ws.iter_rows(min_row=2):
-                        for cell in row:
-                            if isinstance(cell.value, (int, float)):
-                                cell.number_format = "#,##0.00"
+                    tabla = construir_tabla_lista_pagos(pago_por_concepto, conceptos)
+                    st.dataframe(tabla, use_container_width=True, hide_index=True)
 
-                with open(ARCHIVO_OPTIMIZACION, "rb") as archivo:
-                    st.download_button(
-                        "Descargar recomendaciones en Excel",
-                        data=archivo,
-                        file_name=ARCHIVO_OPTIMIZACION,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="descarga_optimizacion",
-                    )
+                    # Excel de recomendaciones
+                    with pd.ExcelWriter(ARCHIVO_OPTIMIZACION, engine="openpyxl") as writer:
+                        tabla.to_excel(writer, sheet_name="Optimización", index=False)
+                        ws = writer.sheets["Optimización"]
+                        aplicar_formato_tabla(ws)
+                        for row in ws.iter_rows(min_row=2):
+                            for cell in row:
+                                if isinstance(cell.value, (int, float)):
+                                    cell.number_format = "#,##0.00"
 
-            st.write("")
-            st.markdown('<div class="regla-marca"></div>', unsafe_allow_html=True)
-            with st.expander(
-                "Comparar Modelo A vs. Modelo B (trade-off caja vs. deuda)"
-            ):
-                st.caption(
-                    "Corre los dos modelos con el mismo horizonte, colchones, y saldo "
-                    "inicial (incluyendo el ajuste manual si lo usaste arriba) -- ambos "
-                    "deciden libremente cuánta deuda pagar, sin presupuesto forzado."
-                )
-                comparar = st.button("Generar comparación")
-
-                if comparar:
-                    I_c, E_c = obtener_proyeccion(df, horizonte)
-                    C0_c = saldo_actual
-                    D0_c = deudas.values.tolist()
-                    D0_total_c = float(sum(D0_c))
-
-                    P_a, ratios_a, exito_a = modelo_a_optimizacion_global(
-                        D0_c, I_c, E_c, C0_c, L_min, L_survival, horizonte
-                    )
-                    P_b, ratios_b, exito_b = modelo_b_ratio_pago(
-                        D0_c,
-                        I_c,
-                        E_c,
-                        C0_c,
-                        horizonte,
-                        L_min=L_min,
-                        L_survival=L_survival,
-                    )
-
-                    if not (exito_a and exito_b):
-                        st.error(
-                            "Alguno de los dos modelos no encontró solución factible con "
-                            "estos parámetros; ajusta el saldo inicial, el horizonte, o los "
-                            "colchones e intenta de nuevo."
+                    with open(ARCHIVO_OPTIMIZACION, "rb") as archivo:
+                        st.download_button(
+                            "Descargar recomendaciones en Excel",
+                            data=archivo,
+                            file_name=ARCHIVO_OPTIMIZACION,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="descarga_optimizacion",
                         )
-                    else:
-
-                        def caja_proyectada(P, I, E, C0):
-                            IE = np.array(I, dtype=float) - np.array(E, dtype=float)
-                            pagos_sem = P.sum(axis=0)
-                            return C0 + np.cumsum(IE) - np.cumsum(pagos_sem)
-
-                        def deuda_restante_proyectada(P, D0_total):
-                            pagos_sem = P.sum(axis=0)
-                            return D0_total - np.cumsum(pagos_sem)
-
-                        caja_a = caja_proyectada(P_a, I_c, E_c, C0_c)
-                        caja_b = caja_proyectada(P_b, I_c, E_c, C0_c)
-                        deuda_a = deuda_restante_proyectada(P_a, D0_total_c)
-                        deuda_b = deuda_restante_proyectada(P_b, D0_total_c)
-
-                        resumen = pd.DataFrame(
-                            {
-                                "Modelo": [
-                                    "Modelo A (Global)",
-                                    "Modelo B (Ratio de Pago)",
-                                ],
-                                "Piso de caja mínimo": [caja_a.min(), caja_b.min()],
-                                "Deuda final restante": [deuda_a[-1], deuda_b[-1]],
-                                "% de deuda pagada": [
-                                    100 * (1 - deuda_a[-1] / D0_total_c),
-                                    100 * (1 - deuda_b[-1] / D0_total_c),
-                                ],
-                            }
-                        )
-                        st.dataframe(resumen, use_container_width=True, hide_index=True)
-
-                        fig, ax_caja = plt.subplots(figsize=(10, 6))
-                        ax_deuda = ax_caja.twinx()
-                        semanas = list(range(1, horizonte + 1))
-                        nombres = ["Modelo A (Global)", "Modelo B (Ratio de Pago)"]
-                        colores = ["tab:blue", "tab:green"]
-                        cajas = [caja_a, caja_b]
-                        deudas_din = [deuda_a, deuda_b]
-
-                        for nombre, color, caja_arr, deuda_arr in zip(
-                            nombres, colores, cajas, deudas_din
-                        ):
-                            ax_caja.plot(
-                                semanas,
-                                caja_arr,
-                                marker="o",
-                                color=color,
-                                linestyle="-",
-                                label=f"Caja - {nombre}",
-                            )
-                            ax_deuda.plot(
-                                semanas,
-                                deuda_arr,
-                                marker="s",
-                                color=color,
-                                linestyle="--",
-                                alpha=0.6,
-                                label=f"Deuda - {nombre}",
-                            )
-
-                        ax_caja.axhline(
-                            L_min,
-                            color="green",
-                            linestyle=":",
-                            linewidth=1,
-                            label="L_min (colchón cómodo)",
-                        )
-                        ax_caja.axhline(
-                            L_survival,
-                            color="red",
-                            linestyle=":",
-                            linewidth=1,
-                            label="L_survival (piso de emergencia)",
-                        )
-                        ax_caja.set_xlabel("Semana")
-                        ax_caja.set_ylabel("Caja proyectada ($)")
-                        ax_deuda.set_ylabel("Deuda restante ($)")
-                        ax_caja.set_title(
-                            "Trade-off caja vs. deuda (Modelo A vs. Modelo B)"
-                        )
-
-                        l1, e1 = ax_caja.get_legend_handles_labels()
-                        l2, e2 = ax_deuda.get_legend_handles_labels()
-                        ax_caja.legend(
-                            l1 + l2,
-                            e1 + e2,
-                            loc="center left",
-                            bbox_to_anchor=(1.15, 0.5),
-                            fontsize=8,
-                        )
-                        plt.tight_layout()
-                        st.pyplot(fig)
 
 # ============================================================
 #  PANTALLA DE BIENVENIDA (cuando no hay ningún módulo abierto)
