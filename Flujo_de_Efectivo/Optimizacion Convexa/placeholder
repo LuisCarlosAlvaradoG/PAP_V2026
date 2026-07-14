@@ -1,4 +1,319 @@
+```python
+import numpy as np
+from scipy.optimize import linprog
 
+def modelo3_resiliencia(
+    I, E, C0, T,
+    R, F, s,
+    E_max=None,
+    L_min=None,
+    D0=None   # no se usa, solo por uniformidad
+):
+    """
+    Modelo 3 – Resiliencia pura del flujo de caja (v2.0 contractual).
+
+    Implementa el problema maximin de piso de caja reprogramando los egresos
+    flexibles dentro de una ventana temporal ±s, con restricciones de capacidad
+    semanal opcionales.
+
+    Parámetros
+    ----------
+    I : array (T,) – Ingresos semanales.
+    E : array (T,) – Egresos totales originales (solo para métricas, no se usa en optimización).
+    C0 : float – Saldo inicial de caja.
+    T : int – Número de semanas del horizonte.
+    R : array (T,) – Parte rígida de los egresos.
+    F : array (T,) – Parte flexible de los egresos (R + F debe coincidir con E, pero no se comprueba).
+    s : int – Ventana de desplazamiento (semanas). x_{τ,t} solo existe si |t-τ| ≤ s.
+    E_max : array (T,) o None – Límite máximo de egreso total por semana (R + flexible reprogramado).
+            Si None, no se impone límite.
+    L_min : float o None – Colchón de liquidez mínimo. Si se especifica, se fuerza m ≥ L_min.
+    D0 : cualquier – Ignorado. Se acepta por compatibilidad con otros modelos.
+
+    Retorna
+    -------
+    dict con:
+        m_opt      : float – Piso máximo alcanzable.
+        C_opt      : list (T+1) – Trayectoria óptima de caja (C0, C1, ..., CT).
+        E_opt      : list (T) – Egresos reprogramados óptimos (R + flexible reubicado).
+        x_opt      : dict {(τ,t): valor} – Flujos flexibles óptimos (solo los relevantes).
+        exito      : bool – True si la optimización fue exitosa.
+        t_crit     : int – Semana (1..T) donde se alcanza el mínimo de C_opt.
+        K_star     : float – Índice de concentración de carga (max E_opt / suma E_opt).
+    """
+    # Validación básica
+    I = np.asarray(I, dtype=float)
+    E = np.asarray(E, dtype=float)
+    R = np.asarray(R, dtype=float)
+    F = np.asarray(F, dtype=float)
+    if not (len(I) == len(E) == len(R) == len(F) == T):
+        raise ValueError("I, E, R, F deben tener longitud T")
+    if np.any(F < 0) or np.any(R < 0):
+        raise ValueError("R y F deben ser no negativos")
+
+    # Si no hay flexibilidad, simulación directa
+    if np.all(F == 0):
+        C_sim = np.zeros(T+1)
+        C_sim[0] = C0
+        for t in range(1, T+1):
+            C_sim[t] = C_sim[t-1] + I[t-1] - E[t-1]
+        m_opt = np.min(C_sim[1:])
+        return dict(
+            m_opt=m_opt,
+            C_opt=C_sim.tolist(),
+            E_opt=E.tolist(),
+            x_opt={},
+            exito=True,
+            t_crit=int(np.argmin(C_sim[1:])) + 1,
+            K_star=(np.max(E) / np.sum(E)) if np.sum(E) > 0 else np.nan
+        )
+
+    # Construir variables: solo pares (τ,t) con |t-τ| ≤ s.
+    # Usamos índices base 0 internamente.
+    pairs = []          # lista de (tau, t) en orden
+    idx_map = {}        # (tau, t) -> índice de variable
+    n_x = 0
+    for tau in range(T):
+        t_start = max(0, tau - s)
+        t_end = min(T, tau + s + 1)
+        for t in range(t_start, t_end):
+            pairs.append((tau, t))
+            idx_map[(tau, t)] = n_x
+            n_x += 1
+
+    # Número total de variables: n_x (x) + 1 (m)
+    n_vars = n_x + 1
+    idx_m = n_x  # índice de m en el vector de variables
+
+    # Función objetivo: maximizar m  =>  minimizar -m
+    c = np.zeros(n_vars)
+    c[idx_m] = -1.0
+
+    # ---------------------------------------------------------
+    # Restricciones de igualdad: ∑_t x_{τ,t} = F_τ  ∀τ
+    # ---------------------------------------------------------
+    A_eq = []
+    b_eq = []
+    for tau in range(T):
+        row = np.zeros(n_vars)
+        t_start = max(0, tau - s)
+        t_end = min(T, tau + s + 1)
+        for t in range(t_start, t_end):
+            row[idx_map[(tau, t)]] = 1.0
+        A_eq.append(row)
+        b_eq.append(F[tau])
+    A_eq = np.array(A_eq)
+    b_eq = np.array(b_eq)
+
+    # ---------------------------------------------------------
+    # Restricciones de desigualdad
+    # ---------------------------------------------------------
+    A_ub = []
+    b_ub = []
+
+    # 3.3 Dinámica + 3.4 Piso: C_t >= m para t=1..T
+    # C_t = C0 + sum_{k=1}^t I_k - sum_{k=1}^t R_k - sum_{k=1}^t (sum_{τ} x_{τ,k})
+    # => - sum_{k=1}^t (∑_τ x_{τ,k}) - m >= - (C0 + sum_{k=1}^t I_k - sum_{k=1}^t R_k)
+    cum_I = np.cumsum(I)
+    cum_R = np.cumsum(R)
+    for t_idx in range(1, T+1):  # t_idx es t (1..T)
+        row = np.zeros(n_vars)
+        # Acumulamos -x_{τ,k} para k=0..t_idx-1 (equivalente a 1..t)
+        for k in range(t_idx):
+            # Para cada k, los τ tales que |τ-k| ≤ s
+            tau_start = max(0, k - s)
+            tau_end = min(T, k + s + 1)
+            for tau in range(tau_start, tau_end):
+                if (tau, k) in idx_map:
+                    row[idx_map[(tau, k)]] -= 1.0
+        row[idx_m] = -1.0
+        rhs = -(C0 + cum_I[t_idx-1] - cum_R[t_idx-1])
+        A_ub.append(row)
+        b_ub.append(rhs)
+
+    # 3.2 Capacidad semanal (opcional): ∑_τ x_{τ,t} ≤ E_max_t - R_t
+    if E_max is not None:
+        E_max = np.asarray(E_max, dtype=float)
+        if len(E_max) != T:
+            raise ValueError("E_max debe tener longitud T")
+        for t in range(T):
+            if np.isfinite(E_max[t]):
+                row = np.zeros(n_vars)
+                tau_start = max(0, t - s)
+                tau_end = min(T, t + s + 1)
+                for tau in range(tau_start, tau_end):
+                    row[idx_map[(tau, t)]] = 1.0
+                rhs = E_max[t] - R[t]
+                A_ub.append(row)
+                b_ub.append(rhs)
+
+    # 3.5 Colchón de liquidez: m ≥ L_min
+    if L_min is not None:
+        row = np.zeros(n_vars)
+        row[idx_m] = -1.0   # -m <= -L_min  =>  -m >= -L_min no, queremos m >= L_min => -m <= -L_min
+        # En formato A_ub * x <= b_ub, queremos -m <= -L_min  => fila: [0..0, -1] * x <= -L_min
+        row[idx_m] = -1.0
+        A_ub.append(row)
+        b_ub.append(-L_min)
+
+    A_ub = np.array(A_ub) if A_ub else None
+    b_ub = np.array(b_ub) if b_ub else None
+
+    # Cotas: x ≥ 0, m libre (sin cota)
+    bounds = [(0, None)] * n_x + [(None, None)]
+
+    # ---------------------------------------------------------
+    # Resolver LP
+    # ---------------------------------------------------------
+    res = linprog(
+        c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        method='highs'
+    )
+
+    if not res.success:
+        return dict(
+            m_opt=np.nan,
+            C_opt=[],
+            E_opt=[],
+            x_opt={},
+            exito=False,
+            t_crit=None,
+            K_star=np.nan
+        )
+
+    # Extraer solución
+    x_sol = res.x[:n_x]
+    m_opt = res.x[idx_m]
+
+    # Construir x_opt como diccionario
+    x_opt = {pair: x_sol[idx_map[pair]] for pair in pairs}
+
+    # Reconstruir E_opt y C_opt
+    E_opt = np.copy(R)
+    for (tau, t), val in x_opt.items():
+        E_opt[t] += val
+
+    C_opt = np.zeros(T+1)
+    C_opt[0] = C0
+    for t in range(1, T+1):
+        C_opt[t] = C_opt[t-1] + I[t-1] - E_opt[t-1]
+
+    # Semana crítica (1-indexada)
+    t_crit = int(np.argmin(C_opt[1:])) + 1
+
+    # Índice de concentración de carga
+    sum_E_opt = np.sum(E_opt)
+    K_star = np.max(E_opt) / sum_E_opt if sum_E_opt > 0 else np.nan
+
+    return dict(
+        m_opt=m_opt,
+        C_opt=C_opt.tolist(),
+        E_opt=E_opt.tolist(),
+        x_opt=x_opt,
+        exito=True,
+        t_crit=t_crit,
+        K_star=K_star
+    )
+```
+
+**Correspondencia exacta con la especificación v2.0:**
+
+- **Descomposición exógena:** `R` y `F` son argumentos directos. El modelo no los modifica ni estima.
+- **Variables:** `x_{τ,t}` solo existen para `|t-τ| ≤ s`, exactamente como en la definición.
+- **Conservación:** `A_eq` fuerza que la suma de flujos desde `τ` iguala `F_τ`.
+- **Capacidad semanal opcional:** si se proporciona `E_max`, se añade la cota `∑_τ x_{τ,t} ≤ E_max_t - R_t`. Si no, queda sin límite superior artificial.
+- **Dinámica y piso:** las restricciones de desigualdad acumulan `-∑x` para cada `t` y exigen `C_t ≥ m`.
+- **Colchón:** si `L_min` es dado, se añade `m ≥ L_min` vía `-m ≤ -L_min`.
+- **Función objetivo:** maximizar `m` minimizando `-m`.
+- **Salidas:** `m_opt`, `C_opt`, `E_opt`, `x_opt` (el flujo detallado), `t_crit`, `K_star` (índice de concentración), y bandera `exito`.
+
+# ============================================================
+#  CONFIGURACIÓN — MISMOS ARCHIVOS QUE USA EL DASHBOARD
+# ============================================================
+# IMPORTANTE: estas rutas deben apuntar a los mismos archivos que usa
+# app.py (Streamlit). Si el dashboard corre en otra carpeta, ajustar aquí.
+ARCHIVO_DATOS = "../Datos flujo de efectivo.xlsx"
+ARCHIVO_PAGOS = "../Pagos pendientes.xlsx"
+
+COLUMNAS_PAGOS = [
+    "concepto", "categoría", "tipo", "importe", "semana",
+    "inicio_semana", "fecha_registro", "estatus", "fecha_pago",
+]
+def cargar_datos_flujo(ruta=ARCHIVO_DATOS):
+    """Carga el histórico de movimientos (mismo formato que usa generar_flujo en el dashboard)."""
+    df = pd.read_excel(ruta)
+    df["inicio_semana"] = pd.to_datetime(df["inicio_semana"], dayfirst=True)
+    df["tipo"] = df["tipo"].astype(str).str.strip()
+    df["categoría"] = df["categoría"].astype(str).str.strip()
+    df["descripción"] = df["descripción"].astype(str).str.strip()
+    df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+    return df
+
+
+def cargar_pagos_pendientes(ruta=ARCHIVO_PAGOS):
+    """Carga pagos pendientes. Si el archivo no existe, retorna un DataFrame vacío
+    con las columnas esperadas (igual que cargar_pagos() en el dashboard)."""
+    try:
+        dfp = pd.read_excel(ruta)
+        for col in COLUMNAS_PAGOS:
+            if col not in dfp.columns:
+                dfp[col] = ""
+        dfp = dfp[COLUMNAS_PAGOS]
+    except FileNotFoundError:
+        dfp = pd.DataFrame(columns=COLUMNAS_PAGOS)
+    return dfp
+
+
+def obtener_deudas_pendientes(dfp):
+    """Agrupa la deuda pendiente por concepto/proveedor (D_i). Igual que en el dashboard."""
+    pend = dfp[dfp["estatus"] == "Pendiente"].copy()
+    pend["importe"] = pd.to_numeric(pend["importe"], errors="coerce").fillna(0)
+    resumen = pend.groupby("concepto")["importe"].sum()
+    return resumen[resumen > 0].sort_values(ascending=False)
+
+
+def calcular_saldo_actual(df):
+    ingresos = df.loc[df["tipo"] == "Ingreso", "importe"].sum()
+    egresos = df.loc[df["tipo"] == "Egreso", "importe"].sum()
+    return float(ingresos - egresos)
+
+
+def obtener_proyeccion_base(df, horizonte):
+    """Proyecta ingresos/egresos futuros usando el promedio de las últimas 6 semanas
+    registradas. Reescrito con pivot_table para evitar el FutureWarning de
+    groupby().apply() que tiene la versión del dashboard."""
+    resumen = df.pivot_table(
+        index="inicio_semana", columns="tipo", values="importe",
+        aggfunc="sum", fill_value=0,
+    ).sort_index()
+
+    for col in ["Ingreso", "Egreso"]:
+        if col not in resumen.columns:
+            resumen[col] = 0.0
+
+    ultimas = resumen.tail(6)
+    ingreso_prom = float(ultimas["Ingreso"].mean()) if not ultimas.empty else 0.0
+    egreso_prom = float(ultimas["Egreso"].mean()) if not ultimas.empty else 0.0
+    return [ingreso_prom] * horizonte, [egreso_prom] * horizonte
+# ============================================================
+#  CARGA REAL DE DATOS
+# ============================================================
+df = cargar_datos_flujo()
+dfp = cargar_pagos_pendientes()
+
+deudas = obtener_deudas_pendientes(dfp)
+saldo_actual = calcular_saldo_actual(df)
+
+print(f"Movimientos históricos cargados: {len(df)}")
+print(f"Pagos pendientes registrados: {len(dfp)}")
+print(f"Deudas pendientes por concepto (D_i):")
+display(deudas)
+print(f"\nSaldo actual (C0): {saldo_actual:,.2f}")
 # ============================================================
 #  PARÁMETROS DE PRUEBA (ajustar libremente en cada corrida)
 # ============================================================
@@ -66,115 +381,30 @@ def modelo5_opcion_a(D0, I, E, C0, L_min, T, agresividad=0.5, epsilon=1e-6):
 
     return P, ratios, True
 # ============================================================
-#  MODELO 5 — OPCIÓN B: SLP (Sequential Linear Programming)
+#  TABLA DE RESULTADOS (incluye el ratio, a diferencia del dashboard actual)
 # ============================================================
-def modelo5_opcion_b(D0, I, E, C0, L_min, T, max_iter=15, tol=1e-4, epsilon=1e-6):
-    """
-    Aproxima min Σ_t D_t/(C_t+L_min) mediante linealización sucesiva:
-
-    En cada iteración k, se linealiza el ratio D_t/(C_t+L_min) alrededor de la
-    solución actual (P^k) usando la derivada respecto a los pagos, y se resuelve
-    un LP para obtener P^(k+1). Se repite hasta que el cambio en el objetivo sea
-    menor a `tol` o se alcance `max_iter`.
-
-    El objetivo real (no lineal) se recalcula en cada iteración para verificar
-    convergencia real, no solo la convergencia del LP linealizado.
-
-    Retorna:
-        P: matriz (n, T) de pagos por concepto y semana
-        ratios: lista de longitud T con el ratio D_t/(C_t+L_min) de la solución final
-        exito: bool, True si el LP convergió en al menos una iteración
-    """
-    n = len(D0)
+def construir_tabla_modelo5(P, ratios, conceptos, I, E, C0, L_min):
+    n, T = P.shape
     IE = np.array(I, dtype=float) - np.array(E, dtype=float)
-    cum_IE = np.cumsum(IE)
-    D0_arr = np.array(D0, dtype=float)
+    pagos_sem = P.sum(axis=0)
+    C = C0 + np.cumsum(IE) - np.cumsum(pagos_sem)
+    U = IE - pagos_sem
 
-    def caja(P):
-        pagos_sem = P.sum(axis=0)
-        return C0 + cum_IE - np.cumsum(pagos_sem)
+    filas = []
+    for t in range(T):
+        fila = {"Semana": t + 1}
+        for i, concepto in enumerate(conceptos):
+            fila[f"Pagar {concepto} ($)"] = round(float(P[i, t]), 2)
+        fila["Utilidad/Retenida ($)"] = round(float(U[t]), 2)
+        fila["Caja Proyectada ($)"] = round(float(C[t]), 2)
+        fila["Ratio D/C"] = round(float(ratios[t]), 4)
+        if C[t] <= L_min:
+            estado = "Sin margen"
+        elif C[t] <= L_min * 1.5:
+            estado = "Ajustado"
+        else:
+            estado = "Operable"
+        fila["Estado"] = estado
+        filas.append(fila)
 
-    def deuda_restante_por_semana(P):
-        # deuda total restante al final de cada semana t
-        pagos_acumulados = np.cumsum(P.sum(axis=0))
-        return D0_arr.sum() - pagos_acumulados
-
-    def objetivo_real(P):
-        C = caja(P)
-        D_t = deuda_restante_por_semana(P)
-        return np.sum(D_t / (C + L_min + epsilon))
-
-    # Punto de partida: repartir uniformemente la deuda entre las semanas
-    P_actual = np.tile(D0_arr[:, None] / T, (1, T))
-    obj_actual = objetivo_real(P_actual)
-
-    exito_alguna_iter = False
-
-    for _ in range(max_iter):
-        C = caja(P_actual)
-        D_t = deuda_restante_por_semana(P_actual)
-        denom = (C + L_min + epsilon)
-
-        # Gradiente aproximado del ratio respecto a un pago adicional en la semana tau
-        # para el concepto i: pagar en tau reduce D_t y aumenta C_t para todo t >= tau,
-        # así que el efecto marginal es acumulativo hacia adelante.
-        # d(ratio_t)/d(pago en tau) ≈ [-1/denom_t] si t>=tau (reduce deuda)
-        #                            + [D_t/denom_t^2] si t>=tau (aumenta caja, baja ratio)
-        costo_marginal = np.zeros((n, T))
-        for tau in range(T):
-            efecto = 0.0
-            for t in range(tau, T):
-                efecto += (-1.0 / denom[t]) + (D_t[t] / (denom[t] ** 2))
-            costo_marginal[:, tau] = efecto  # mismo efecto para cualquier concepto i en tau
-
-        c = costo_marginal.flatten()
-
-        nvars = n * T
-        A_ub, b_ub = [], []
-
-        # No exceder la deuda pendiente por concepto
-        for i in range(n):
-            row = np.zeros(nvars)
-            row[i * T:(i + 1) * T] = 1
-            A_ub.append(row)
-            b_ub.append(D0[i])
-
-        # Caja no negativa
-        for t in range(T):
-            row = np.zeros(nvars)
-            for i in range(n):
-                row[i * T: i * T + t + 1] = 1
-            A_ub.append(row)
-            b_ub.append(C0 + cum_IE[t])
-
-        # Piso de caja L_min (restricción dura, a diferencia de la Opción A)
-        for t in range(T):
-            row = np.zeros(nvars)
-            for i in range(n):
-                row[i * T: i * T + t + 1] = 1
-            A_ub.append(row)
-            b_ub.append(C0 + cum_IE[t] - L_min)
-
-        bounds = [(0, None)] * nvars
-        res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method="highs")
-
-        if not res.success:
-            break
-
-        P_nuevo = res.x.reshape(n, T)
-        obj_nuevo = objetivo_real(P_nuevo)
-
-        exito_alguna_iter = True
-
-        if abs(obj_actual - obj_nuevo) < tol:
-            P_actual = P_nuevo
-            obj_actual = obj_nuevo
-            break
-
-        P_actual, obj_actual = P_nuevo, obj_nuevo
-
-    C_final = caja(P_actual)
-    D_t_final = deuda_restante_por_semana(P_actual)
-    ratios = list(D_t_final / (C_final + L_min + epsilon))
-
-    return P_actual, ratios, exito_alguna_iter
+    return pd.DataFrame(filas)
