@@ -578,71 +578,6 @@ def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
                 exito=True, t_crit=t_crit, K_star=K_star)
 
 
-def modelo_b_ratio_pago(D0, I, E, C0, T, L_min=200_000.0, L_survival=10_000.0,
-                         pago_max_frac_ingreso=0.5, D_crit=5.0, piso_agres=0.05, epsilon=1e-6):
-    """
-    Modelo B - Ratio de Pago (heurística snowball con estrés dinámico), DECISIÓN LIBRE.
-
-    HISTORIAL DEL DISEÑO: en versiones anteriores este modelo recibía un
-    presupuesto de pago FIJO (p. ej. 25% de la deuda), porque con una caja
-    estructuralmente negativa el mecanismo original -- "paga solo si hay
-    excedente real por encima de un piso dinámico" -- nunca encontraba
-    excedente (la caja jamás superaba ningún piso positivo), así que nunca
-    pagaba nada.
-
-    Con una caja inicial ya positiva, sí puede existir excedente real. Se
-    regresa entonces al diseño original: el modelo YA NO recibe presupuesto
-    fijo -- cada semana calcula cuánta caja tiene disponible por encima de un
-    piso dinámico (entre L_survival y L_min, según qué tan estresada esté la
-    situación), y paga una fracción de ese excedente real, modulada por la
-    misma agresividad basada en estrés. Si no hay excedente, no paga -- puede
-    pagar $0 varias semanas seguidas si la caja está justo en el piso.
-
-    Snowball: el pago de cada semana se reparte entre las deudas individuales,
-    de la más chica a la más grande, saldando cada una por completo antes de
-    tocar la siguiente.
-    """
-    n = len(D0)
-    D_restante = np.array(D0, dtype=float)
-    C = C0
-    P = np.zeros((n, T))
-    ratios = []
-
-    for t in range(T):
-        C_disp = C + (I[t] - E[t])
-
-        liq_ratio = (C_disp + L_min) / (L_min + epsilon)
-        stress_liq = float(np.clip(1.0 - liq_ratio, 0.0, 1.0))
-        denom = max(abs(C_disp) + L_min, epsilon)
-        stress_debt = min(D_restante.sum() / denom / D_crit, 1.0)
-        s_stress = max(stress_liq, stress_debt)
-
-        agresividad = max(1.0 - s_stress, piso_agres)
-        L_dyn = L_survival + (L_min - L_survival) * (1.0 - s_stress)
-        excedente = max(0.0, C_disp - L_dyn)
-
-        tope_semana = pago_max_frac_ingreso * I[t]
-        pago_total = max(0.0, min(excedente * agresividad, tope_semana, D_restante.sum()))
-
-        if pago_total > 0:
-            orden = np.argsort(D_restante)
-            restante = pago_total
-            for i in orden:
-                if restante <= 0:
-                    break
-                abono = min(D_restante[i], restante)
-                P[i, t] = abono
-                D_restante[i] -= abono
-                restante -= abono
-
-        pagado_esta_semana = P[:, t].sum()
-        C = C_disp - pagado_esta_semana
-        ratio_t = D_restante.sum() / (C + L_min + epsilon)
-        ratios.append(ratio_t)
-
-    return P, ratios, True
-
-
 def construir_tabla_lista_pagos(pago_por_concepto, conceptos):
     """Tabla de recomendación SIMPLE: una lista de "Concepto | Pago Recomendado",
     sin desglose semanal -- ambos modelos (A y B) ahora responden "cuánto pagarle
@@ -1612,6 +1547,13 @@ elif st.session_state.modulo_activo == "pagos":
     # ---------------- OPTIMIZACIÓN DE PAGOS (reorganizado) ----------------
     elif seccion_p == "optimizar":
         deudas = obtener_deudas_pendientes(dfp)
+        hoy = pd.Timestamp.today().normalize()
+        df_semanas = df.copy()
+        df_semanas["fin_semana"] = df_semanas["inicio_semana"] + pd.Timedelta(days=6)
+        df_completas = df_semanas.loc[df_semanas["fin_semana"] < hoy]
+        semanas_disponibles = df_completas["inicio_semana"].nunique()
+        max_ventana = max(1, semanas_disponibles)
+
 
         if deudas.empty:
             st.info(
@@ -1641,42 +1583,52 @@ elif st.session_state.modulo_activo == "pagos":
                     "(las semanas más recientes pesan más)."
                 )
 
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
+                    ventana = st.number_input(
+                        "Ventana del Promedio Movil (semanas)",
+                        min_value = 1,
+                        max_value = max_ventana,
+                        value = min(8,max_ventana),
+                        step = 1,
+                        help = f"Máximo de semanas completas en el historial {max_ventana}"
+                    )
+                with col2:
                     horizonte = st.number_input(
                         "Horizonte de proyección (semanas, T)",
                         min_value=1,
                         max_value=52,
-                        value=12,
+                        value=4,
                         step=1,
                     )
-                with col2:
+                with col3:
                     umbral_verde = st.number_input(
                         "Umbral verde (colchón cómodo)",
                         min_value=0.0,
                         value=200_000.0,
                         step=500.0,
                     )
-                with col3:
+                with col4:
                     umbral_amarillo = st.number_input(
                         "Umbral amarillo (precaución)",
                         min_value=0.0,
                         value=50_000.0,
                         step=500.0,
                     )
-                with col4:
+                with col5:
                     umbral_rojo = st.number_input(
                         "Umbral rojo (piso de emergencia)",
                         min_value=0.0,
-                        value=5_000.0,
+                        value=10_000.0,
                         step=500.0,
                     )
 
+
                 saldo_actual = calcular_saldo_actual(df)
-                I_proy, E_proy = obtener_proyeccion_ponderada(df, horizonte, ventana=8)
+                I_proy, E_proy = obtener_proyeccion_ponderada(df, horizonte, ventana)
                 st.metric("Saldo actual (C0)", moneda(saldo_actual))
                 st.caption(
-                    f"Proyección media móvil ponderada (8 sem.): {moneda(I_proy[0])}/semana "
+                    f"Proyección media móvil ponderada ({ventana} sem.): {moneda(I_proy[0])}/semana "
                     f"de ingreso, {moneda(E_proy[0])}/semana de egreso (las semanas más "
                     f"recientes pesan más), aplicado a las próximas {horizonte} semanas."
                 )
@@ -1711,7 +1663,7 @@ elif st.session_state.modulo_activo == "pagos":
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Pago total recomendado", moneda(pago_total))
                     c2.metric("Caja resultante (solo el pago)", moneda(caja_resultante))
-                    c3.metric(f"Caja proyectada (a {horizonte} sem.)", moneda(caja_proyectada))
+                    c3.metric(f"Caja  r. proyectada (a {horizonte} sem.)", moneda(caja_proyectada))
                     c4.metric("Deuda restante", moneda(deuda_resultante))
 
                     st.markdown(
