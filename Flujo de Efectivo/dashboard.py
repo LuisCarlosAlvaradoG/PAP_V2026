@@ -449,135 +449,6 @@ def modelo_a_pareto(D0, I, E, C0, L_rojo, T, n_candidatos=2001):
     )
     return pago_por_concepto, diagnostico, True
 
-
-def modelo2_resiliencia(I, E, C0, T, R, F, s, E_max=None, L_min=None, D0=None):
-    """
-    Modelo 2 - Máxima resiliencia financiera.
-
-    NOTA: se conserva SOLO como referencia académica -- ya no aparece en el
-    selector de la interfaz ni en la comparación interactiva de modelos. Por
-    diseño, nunca paga ni un peso de deuda (solo reprograma egresos), así que
-    no aporta al objetivo de "ver al modelo decidir cuánto pagar" que motivó
-    esta versión del módulo. Queda documentada aquí por si se necesita
-    referenciarla o retomarla más adelante.
-
-    Extremo CONSERVADOR del espectro: por diseño nunca toca D0 ni paga un peso de
-    deuda (solo reprograma egresos flexibles dentro de una ventana +-s semanas,
-    respetando los egresos rígidos). Maximiza el piso de caja alcanzable.
-
-    L_min/L_survival ya NO son restricción dura (solo referencia informativa): con
-    flujos donde egresos > ingresos, el piso máximo alcanzable suele ser inferior a
-    cualquier L_min positivo, y exigirlo como obligatorio vuelve el problema
-    infeasible sin importar cómo se reacomoden los pagos.
-
-    Se reporta también la "resiliencia ganada" (m_opt - m_base): cuánto mejora el
-    piso gracias a la reprogramación vs. no reprogramar nada. Matemáticamente esta
-    ganancia es $0 si la semana crítica cae en la ÚLTIMA semana del horizonte (la
-    caja acumulada al final del horizonte es invariante a cómo se reordenen los
-    pagos) -- no es un error, es una propiedad esperada del modelo.
-    """
-    I = np.asarray(I, dtype=float)
-    E = np.asarray(E, dtype=float)
-    R = np.asarray(R, dtype=float)
-    F = np.asarray(F, dtype=float)
-    if not (len(I) == len(E) == len(R) == len(F) == T):
-        raise ValueError("I, E, R, F deben tener longitud T")
-    if np.any(F < 0) or np.any(R < 0):
-        raise ValueError("R y F deben ser no negativos")
-
-    C_base = np.zeros(T + 1)
-    C_base[0] = C0
-    for t in range(1, T + 1):
-        C_base[t] = C_base[t - 1] + I[t - 1] - E[t - 1]
-    m_base = float(np.min(C_base[1:]))
-
-    if np.all(F == 0):
-        return dict(
-            m_opt=m_base, m_base=m_base, ganancia=0.0,
-            C_opt=C_base.tolist(), E_opt=E.tolist(), x_opt={}, exito=True,
-            t_crit=int(np.argmin(C_base[1:])) + 1,
-            K_star=(np.max(E) / np.sum(E)) if np.sum(E) > 0 else np.nan
-        )
-
-    pairs, idx_map, n_x = [], {}, 0
-    for tau in range(T):
-        t_start, t_end = max(0, tau - s), min(T, tau + s + 1)
-        for t in range(t_start, t_end):
-            pairs.append((tau, t))
-            idx_map[(tau, t)] = n_x
-            n_x += 1
-
-    n_vars = n_x + 1
-    idx_m = n_x
-    c = np.zeros(n_vars)
-    c[idx_m] = -1.0
-
-    A_eq, b_eq = [], []
-    for tau in range(T):
-        row = np.zeros(n_vars)
-        t_start, t_end = max(0, tau - s), min(T, tau + s + 1)
-        for t in range(t_start, t_end):
-            row[idx_map[(tau, t)]] = 1.0
-        A_eq.append(row)
-        b_eq.append(F[tau])
-    A_eq, b_eq = np.array(A_eq), np.array(b_eq)
-
-    A_ub, b_ub = [], []
-    cum_I, cum_R = np.cumsum(I), np.cumsum(R)
-    for t_idx in range(1, T + 1):
-        row = np.zeros(n_vars)
-        for k in range(t_idx):
-            tau_start, tau_end = max(0, k - s), min(T, k + s + 1)
-            for tau in range(tau_start, tau_end):
-                if (tau, k) in idx_map:
-                    row[idx_map[(tau, k)]] += 1.0
-        row[idx_m] = 1.0
-        A_ub.append(row)
-        b_ub.append(C0 + cum_I[t_idx - 1] - cum_R[t_idx - 1])
-
-    if E_max is not None:
-        E_max = np.asarray(E_max, dtype=float)
-        for t in range(T):
-            if np.isfinite(E_max[t]):
-                row = np.zeros(n_vars)
-                tau_start, tau_end = max(0, t - s), min(T, t + s + 1)
-                for tau in range(tau_start, tau_end):
-                    row[idx_map[(tau, t)]] = 1.0
-                A_ub.append(row)
-                b_ub.append(E_max[t] - R[t])
-
-    A_ub = np.array(A_ub) if A_ub else None
-    b_ub = np.array(b_ub) if b_ub else None
-    bounds = [(0, None)] * n_x + [(None, None)]
-
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
-
-    if not res.success:
-        return dict(m_opt=np.nan, m_base=m_base, ganancia=np.nan, C_opt=[], E_opt=[],
-                    x_opt={}, exito=False, t_crit=None, K_star=np.nan)
-
-    x_sol = res.x[:n_x]
-    m_opt = res.x[idx_m]
-    x_opt = {pair: x_sol[idx_map[pair]] for pair in pairs}
-
-    E_opt = np.copy(R)
-    for (tau, t), val in x_opt.items():
-        E_opt[t] += val
-
-    C_opt = np.zeros(T + 1)
-    C_opt[0] = C0
-    for t in range(1, T + 1):
-        C_opt[t] = C_opt[t - 1] + I[t - 1] - E_opt[t - 1]
-
-    t_crit = int(np.argmin(C_opt[1:])) + 1
-    sum_E_opt = np.sum(E_opt)
-    K_star = np.max(E_opt) / sum_E_opt if sum_E_opt > 0 else np.nan
-
-    return dict(m_opt=m_opt, m_base=m_base, ganancia=float(m_opt - m_base),
-                C_opt=C_opt.tolist(), E_opt=E_opt.tolist(), x_opt=x_opt,
-                exito=True, t_crit=t_crit, K_star=K_star)
-
-
 def construir_tabla_lista_pagos(pago_por_concepto, conceptos):
     """Tabla de recomendación SIMPLE: una lista de "Concepto | Pago Recomendado",
     sin desglose semanal -- ambos modelos (A y B) ahora responden "cuánto pagarle
@@ -604,45 +475,6 @@ def clasificar_caja(valor, verde, amarillo, rojo):
         return "🔴 Rojo", "red", valor - rojo
     else:
         return "⚫ Crítico (bajo el piso de emergencia)", "black", valor - rojo
-
-
-def construir_tabla_modelo2_resiliencia(res, L_min=None, L_survival=None):
-    """Tabla de recomendación para Modelo 2 (Resiliencia): no reparte pagos por
-    concepto, solo muestra la caja y el egreso reprogramado semana a semana, más
-    las métricas de piso/resiliencia ganada.
-
-    La columna "Semana" se guarda como texto (combina números de semana con
-    etiquetas de métricas), y las columnas numéricas usan NaN (no "") para las
-    celdas en blanco -- una columna de tipo mixto (número + string) rompe la
-    serialización Arrow que usa Streamlit para mostrar tablas.
-    """
-    if not res["exito"]:
-        return pd.DataFrame({"Error": ["Optimización fallida"]})
-    T_mas_1 = len(res["C_opt"])
-    df_tabla = pd.DataFrame({
-        "Semana": [str(t) for t in range(T_mas_1)],
-        "Caja": res["C_opt"],
-        "Egreso_reprogramado": [res["E_opt"][t - 1] if t > 0 else np.nan for t in range(T_mas_1)],
-    })
-    filas_metricas = [
-        ("---", np.nan),
-        ("Piso SIN reprogramar (m_base)", res["m_base"]),
-        ("Piso CON reprogramación (m*)", res["m_opt"]),
-        ("Resiliencia ganada (m* - m_base)", res["ganancia"]),
-        ("Semana crítica", res["t_crit"]),
-        ("Índice K*", res["K_star"]),
-    ]
-    if L_min is not None:
-        filas_metricas.append(("L_min (colchón cómodo, referencia)", L_min))
-    if L_survival is not None:
-        filas_metricas.append(("L_survival (piso de emergencia, referencia)", L_survival))
-    metricas = pd.DataFrame({
-        "Semana": [f[0] for f in filas_metricas],
-        "Caja": [f[1] for f in filas_metricas],
-        "Egreso_reprogramado": [np.nan] * len(filas_metricas),
-    })
-    return pd.concat([df_tabla, metricas], ignore_index=True)
-
 
 # ============================================================
 #  PÁGINA + SISTEMA DE DISEÑO
@@ -1543,7 +1375,6 @@ elif st.session_state.modulo_activo == "pagos":
                 )
 
     # ---------------- OPTIMIZACIÓN DE PAGOS ----------------
-    # ---------------- OPTIMIZACIÓN DE PAGOS (reorganizado) ----------------
     elif seccion_p == "optimizar":
         deudas = obtener_deudas_pendientes(dfp)
         hoy = pd.Timestamp.today().normalize()
