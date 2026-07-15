@@ -15,7 +15,7 @@ from scipy.optimize import linprog, curve_fit
 ARCHIVO_DATOS = "Datos flujo de efectivo.xlsx"
 ARCHIVO_SALIDA = "Flujo de efectivo.xlsx"
 ARCHIVO_PAGOS = "Pagos pendientes.xlsx"
-ARCHIVO_OPTIMIZACION = "Optimizacion de pagos.xlsx"
+ARCHIVO_OPTIMIZACION = "Optimizacion_de_pagos.xlsx"
 
 MESES = {
     1: "enero",
@@ -181,7 +181,7 @@ def generar_flujo(df):
         .reindex(flujo.columns, fill_value=0)
     )
     flujo_neto = total_ingresos - total_egresos
-    saldo_inicial = 0
+    saldo_inicial = 500000
     saldo = saldo_inicial + flujo_neto.cumsum()
 
     flujo.loc["TOTAL INGRESOS"] = total_ingresos
@@ -1215,10 +1215,9 @@ if st.session_state.modulo_activo == "flujo":
                                                 sugerencia
                                             )
                                             st.rerun()
-                            if categoria_escrita:
-                                tipo = st.selectbox(
-                                    "Tipo", ["Ingreso", "Egreso"], index=1
-                                )
+                            tipo = st.selectbox(
+                                "Tipo", ["Ingreso", "Egreso"], index=1
+                            )
 
             if st.button("Guardar movimiento"):
                 if concepto == "":
